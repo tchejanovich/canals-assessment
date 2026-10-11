@@ -9,7 +9,6 @@ import {
 } from 'drizzle-orm/pg-core';
 import { addresses } from './addresses.js';
 import { customers } from './customers.js';
-import { orderStatusEnum } from './enums.js';
 import { warehouses } from './warehouses.js';
 
 /**
@@ -34,7 +33,6 @@ export const orders = pgTable(
     shippingAddressId: bigint('shipping_address_id', {
       mode: 'number',
     }).references(() => addresses.id, { onDelete: 'restrict' }),
-    status: orderStatusEnum('status').notNull().default('PENDING'),
     subtotalAmount: bigint('subtotal_amount', { mode: 'bigint' }).notNull(),
     totalAmount: bigint('total_amount', { mode: 'bigint' }).notNull(),
     currency: char('currency', { length: 3 }).notNull(),
@@ -61,7 +59,6 @@ export const orders = pgTable(
   },
   (table) => [
     index('orders_customer_id_idx').on(table.customerId),
-    index('orders_status_idx').on(table.status),
     index('orders_created_at_idx').on(table.createdAt),
   ],
 );

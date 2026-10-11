@@ -1,4 +1,3 @@
-export * from './enums.js';
 export * from './customers.js';
 export * from './countries.js';
 export * from './regions.js';
