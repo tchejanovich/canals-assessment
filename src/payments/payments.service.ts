@@ -7,6 +7,6 @@ export class PaymentsService {
   async charge(input: ChargeInput): Promise<ChargeResult> {
     const digits = input.creditCardNumber.replace(/\D/g, '');
     const approved = !digits.endsWith('0000') && input.amount > 0n;
-    return { approved, transactionId: randomUUID() };
+    return { approved, externalId: randomUUID(), last4: digits.slice(-4) };
   }
 }

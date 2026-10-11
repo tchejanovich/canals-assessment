@@ -7,3 +7,4 @@ export * from './addresses.js';
 export * from './orders.js';
 export * from './order-items.js';
 export * from './inventory.js';
+export * from './payments.js';

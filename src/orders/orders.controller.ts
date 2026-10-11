@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   Body,
   Controller,
   Headers,
@@ -26,11 +25,6 @@ export class OrdersController {
     @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Res({ passthrough: true }) res: Response,
   ): Promise<OrderResponse> {
-    if (!idempotencyKey) {
-      throw new BadRequestException(
-        'Idempotency-Key header is required to create an order',
-      );
-    }
     const { order, created } = await this.ordersService.createOrder(
       body,
       idempotencyKey,

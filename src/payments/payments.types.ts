@@ -6,5 +6,6 @@ export interface ChargeInput {
 
 export interface ChargeResult {
   approved: boolean;
-  transactionId: string;
+  externalId: string;
+  last4: string;
 }

@@ -120,6 +120,13 @@
       "when": 1791739628321,
       "tag": "0016_add_reserved_and_cancelled_order_states",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1791743555449,
+      "tag": "0017_add_payments",
+      "breakpoints": true
     }
   ]
 }

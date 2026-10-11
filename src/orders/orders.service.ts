@@ -21,6 +21,7 @@ import {
   orderItems,
   type Order,
   orders,
+  payments,
   type Product,
 } from '../db/schema/index.js';
 import { GeocodingService } from '../geocoding/geocoding.service.js';
@@ -82,9 +83,11 @@ export class OrdersService {
 
   async createOrder(
     dto: CreateOrderDto,
-    idempotencyKey: string,
+    idempotencyKey?: string,
   ): Promise<{ order: OrderResponse; created: boolean }> {
-    const replayed = await this.resolveIdempotentReplay(idempotencyKey, dto);
+    const replayed = idempotencyKey
+      ? await this.resolveIdempotentReplay(idempotencyKey, dto)
+      : null;
     if (replayed) {
       return { order: replayed, created: false };
     }
@@ -121,7 +124,9 @@ export class OrdersService {
     }
 
     const totalAmount = subtotalAmount;
-    const requestHash = computeIdempotencyRequestHash(dto);
+    const requestHash = idempotencyKey
+      ? computeIdempotencyRequestHash(dto)
+      : null;
 
     let outcome: { order: Order; state: OrderState };
     try {
@@ -142,7 +147,7 @@ export class OrdersService {
           subtotalAmount,
           totalAmount,
           currency,
-          idempotencyKey,
+          idempotencyKey: idempotencyKey ?? null,
           idempotencyRequestHash: requestHash,
           pricedLineItems,
         });
@@ -162,7 +167,10 @@ export class OrdersService {
         return { order, state: OrderState.Created };
       });
     } catch (error) {
-      if (isUniqueViolation(error, 'orders_idempotency_key_unique')) {
+      if (
+        idempotencyKey &&
+        isUniqueViolation(error, 'orders_idempotency_key_unique')
+      ) {
         // Two requests raced with the same new key; the loser attached to the
         // committed winner instead of creating a duplicate order.
         const replayed = await this.resolveIdempotentReplay(
@@ -199,8 +207,8 @@ export class OrdersService {
       subtotalAmount: bigint;
       totalAmount: bigint;
       currency: string;
-      idempotencyKey: string;
-      idempotencyRequestHash: string;
+      idempotencyKey: string | null;
+      idempotencyRequestHash: string | null;
       pricedLineItems: PricedLineItem[];
     },
   ): Promise<Order> {
@@ -413,7 +421,11 @@ export class OrdersService {
       );
     }
 
-    const activated = await this.activateOrder(reservedOrder.id);
+    const activated = await this.activateOrder(reservedOrder.id, {
+      externalId: payment.externalId,
+      last4: payment.last4,
+      amount: reservedOrder.totalAmount,
+    });
     if (activated) {
       return activated;
     }
@@ -429,22 +441,38 @@ export class OrdersService {
   }
 
   /**
-   * Flips a `reserved` order to `active` in its own tiny transaction. Guarded
-   * on the current state so a concurrent finalizer cannot double-activate: if
-   * the order already moved on, no row matches and `null` is returned.
+   * Flips a `reserved` order to `active` in its own tiny transaction and, in
+   * the same atomic step, records the successful payment. Guarded on the
+   * current state so a concurrent finalizer cannot double-activate or store a
+   * duplicate payment: if the order already moved on, no row matches and
+   * `null` is returned.
    */
-  private async activateOrder(orderId: number): Promise<Order | null> {
-    const [activated] = await this.db.transaction(async (tx) =>
-      tx
+  private async activateOrder(
+    orderId: number,
+    payment: { externalId: string; last4: string; amount: bigint },
+  ): Promise<Order | null> {
+    const activated = await this.db.transaction(async (tx) => {
+      const [row] = await tx
         .update(orders)
         .set({ state: OrderState.Active })
         .where(
           and(eq(orders.id, orderId), eq(orders.state, OrderState.Reserved)),
         )
-        .returning(),
-    );
+        .returning();
 
-    return activated ?? null;
+      if (row) {
+        await tx.insert(payments).values({
+          orderId,
+          externalId: payment.externalId,
+          last4: payment.last4,
+          amount: payment.amount,
+        });
+      }
+
+      return row ?? null;
+    });
+
+    return activated;
   }
 
   /**
