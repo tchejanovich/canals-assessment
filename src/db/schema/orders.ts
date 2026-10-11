@@ -12,17 +12,9 @@ import {
 import { addresses } from './addresses.js';
 import { customers } from './customers.js';
 import { warehouses } from './warehouses.js';
+import { ORDER_STATES, OrderState } from '../../orders/order-state.js';
 
-/**
- * An order is `created` as soon as its header and lines are persisted, while
- * stock reservation is still being attempted. It is flipped to `active` the
- * moment a warehouse reservation succeeds (and the payment is approved).
- * `created` orders are kept deliberately: they are the trace of a race that
- * the nearest-first fallback failed to win, and their id is reported in the
- * 409 response. A `created` order has no warehouse assigned and is NOT
- * shippable; anything reading fulfillable orders must filter on `active`.
- */
-export const orderState = pgEnum('order_state', ['created', 'active']);
+export const orderState = pgEnum('order_state', ORDER_STATES);
 
 /**
  * Order header. The shipping address is snapshotted onto the order so later
@@ -65,7 +57,7 @@ export const orders = pgTable(
     }).notNull(),
     idempotencyKey: text('idempotency_key'),
     idempotencyRequestHash: text('idempotency_request_hash'),
-    state: orderState('state').notNull().default('active'),
+    state: orderState('state').notNull().default(OrderState.Active),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .defaultNow(),

@@ -1,3 +1,5 @@
+import type { OrderState } from '../order-state.js';
+
 export interface OrderItemResponse {
   productId: number;
   sku: string;
@@ -11,7 +13,7 @@ export interface OrderResponse {
   id: number;
   customerId: number;
   warehouseId: number | null;
-  state: 'created' | 'active';
+  state: OrderState;
   subtotalAmount: string;
   totalAmount: string;
   currency: string;

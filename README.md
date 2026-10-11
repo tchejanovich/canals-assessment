@@ -232,32 +232,76 @@ Two supporting decisions:
   read plus an atomic re-check and fallback keeps the lock window to the single
   reserve statement.
 
-### Order states: race losses are recorded, not rolled back
+### Transaction groups: three commits, chosen by lock scope
 
-An order starts life as `created` and becomes `active` the moment a warehouse
-reservation succeeds and the payment is approved. The header, its line items
-and the deduplicated address are written *before* any stock is reserved (after
-validation), and one transaction commits exactly one of two outcomes:
+Creating an order persists address, order, lines, stock and payment — but they
+are not one transaction. The split is decided by *where the writes sit relative
+to the payment call*:
 
-- **A reservation succeeds** on some nearest-first candidate — the order is
-  flipped to `active`, assigned that warehouse, and charged.
-- **Every candidate is exhausted** by the race window — the transaction commits
-  the order in state `created` and the API answers `409` carrying that order's
-  id. No stock was reserved and nothing was charged (reservation failures update
-  zero rows; the charge happens only on activation, inside the same
-  transaction).
+- **Tx 1 — persist + reserve (one short transaction).** The address upsert, the
+  order row (state `created`), its line items and the nearest-first reservation
+  all commit together. If a candidate wins, the *same* row flips to `reserved`
+  and gets its `warehouse_id` atomically with the stock decrement — an observer
+  can never see stock taken but no order. If every candidate loses the race,
+  the order stays `created` (a recorded, harmless row) and the transaction
+  commits that outcome too; nothing was reserved or charged.
+- **Tx 2 — capture (outside any transaction).** The payment call can take
+  seconds and is retried/idempotent on the provider side. It runs *after* the
+  reservation commits, so no inventory row lock is ever held across it, and
+  nothing in Tx 1 depends on the payment outcome — the durable writes are not
+  hostage to a provider timeout.
+- **Tx 3 — finalize (tiny, guarded).** On approval, one
+  `UPDATE … WHERE state = 'reserved'` flips the order to `active`. On decline, a
+  *compensation* transaction flips it to `cancelled` and returns the reserved
+  stock to inventory — both in the same commit, guarded on `state = 'reserved'`
+  so a retried compensation matches zero rows and restores nothing twice.
 
-Why keep the losers? A `409` caused purely by contention is otherwise a black
-box: there is no way to measure how often the nearest-first fallback actually
-loses a sale, and support has nothing to inspect. A recorded `created` order
-gives an id plus full header/line data. Note that no order is *invented* by
-this — the "no candidate at all" case returns `422` *before* any order row
-exists, so `created` rows only ever represent genuine race losses.
+Why not reserve and charge in one transaction? Transaction length and lock
+scope. Holding reserved rows for the duration of a network payment serializes
+other orders against those SKUs and leaves the reservation hostage to the
+provider. Splitting (reserve commits → charge → compensate) bounds the lock
+window to two short statements and turns a declined card into a *reversible,
+recorded* fact instead of a rollback event.
 
-`created` orders are deliberately not shippable: no warehouse is assigned, and
-anything that lists or fulfils orders must filter on `state = 'active'` (the
-`state` + `created_at` index exists for that). A `created` order also keeps its
-idempotency key occupied, which is covered in the next section.
+Why not split order creation from reservation? Because it never extends the
+lock window — the address/order/lines are written before any reserve lock is
+acquired. Two transactions instead of one would leave a crash window with stock
+*decremented but no committed order row* (or an orphan `created` row), and a
+replay in that window would double-decrement. Keeping persist + reserve atomic
+closes that correctness gap for free.
+
+### Order states: four states, one honest lifecycle
+
+`created → reserved → active`, with `cancelled` as the compensated terminal
+state for a declined card. Each state is a committed fact, so a row always says
+exactly where the order stands:
+
+- **`created`** — header, lines and address are durably written but no warehouse
+  has won the stock race yet. This is the *recorded race loss*: a `409` caused
+  purely by contention is otherwise a black box (no way to measure how often the
+  nearest-first fallback actually loses a sale, nothing for support to inspect),
+  so the order is committed with an id and full header/line data. Deliberately
+  not shippable — no warehouse assigned, and anything that lists or fulfils
+  orders must filter on `state = 'active'` (the `state` + `created_at` index
+  exists for that). No order is *invented* by this: the "no candidate at all"
+  case returns `422` *before* any order row exists, so `created` rows only ever
+  represent genuine race losses. A `created` order also keeps its idempotency
+  key occupied.
+- **`reserved`** — a warehouse won: stock was atomically decremented and the
+  `warehouse_id` assigned, but the payment capture has not concluded. This state
+  is what makes the payment call safe to move out of the transaction — the
+  expensive, reversible decision (stock) is committed while the slow,
+  once-captured irreversible decision (money) is still pending. A crash or
+  timeout leaves a *resume point*: replaying the key re-runs the idempotent
+  capture and finalizes instead of charging twice.
+- **`active`** — stock reserved *and* payment captured: the order is real and
+  shippable, and the only state fulfilment systems should act on.
+- **`cancelled`** — the capture was declined. The reserved stock is returned to
+  inventory in the same transaction that flips the state, so a `cancelled` row
+  is the recorded outcome of a declined card: the client saw a `402`, but the
+  row says exactly what happened, and the restored stock is auditable. The key
+  stays bound, so retrying the same key returns the recorded `402` rather than
+  attempting to charge again.
 
 ### Idempotency: one key = one outcome
 
@@ -280,10 +324,15 @@ of a duplicate order. The common contracts are followed:
   running the same payload check, so a concurrent key-reuse with a different
   payload also surfaces a `409`.
 - **A recorded failure owns its key.** A `created` order keeps its key, so
-  retrying the same key returns the recorded `409` rather than re-attempting.
-  One key, one outcome — to try the order again the client issues a new key.
-  This matches the idempotency-key contract used by payment providers such as
-  Stripe.
+  retrying the same key returns the recorded `409` rather than re-attempting;
+  a `cancelled` order keeps it too, so a retry returns the recorded `402` for
+  the declined card instead of trying to charge again. One key, one outcome —
+  to try the order again the client issues a new key. This matches the
+  idempotency-key contract used by payment providers such as Stripe.
+- **Reservations are resumable.** A replay whose stored order is `reserved`
+  means the original request committed the stock but never finished the (slow)
+  capture. The replay *resumes* it: the capture is idempotent per order, so
+  re-running it is safe, and the order is finalized to `active` in the reply.
 
 ### Mocks
 
@@ -319,17 +368,19 @@ bucket that are easy to confuse are the stock cases, so they get a callout.
 | Code | When it happens | What it means | What to do |
 |------|-----------------|---------------|------------|
 | `400 Bad Request` | The body failed Zod validation, the `Idempotency-Key` header is missing, the country/region is unknown, a product is inactive, items mix currencies, or items repeat a `productId` | The request is malformed or violates a business rule the server can check without stock | Fix the request (send an `Idempotency-Key` for every attempt) |
-| `402 Payment Required` | The payment provider declined the card (e.g. a number ending in `0000`) | Payment was refused; the entire transaction was rolled back — no order recorded, no stock reserved | Use a valid card (note: `402` was chosen as the nearest standard code to “payment needed”; it is a non-standard use of the code) |
+| `402 Payment Required` | The payment provider declined the card (e.g. a number ending in `0000`) | Payment was refused. The reservation was committed first, then compensated: the order is **recorded** as `cancelled` and the reserved stock returned to inventory in the same transaction (nothing ships, nothing is double-decremented) | Retry with a **new** `Idempotency-Key` (the same key will keep returning this recorded `402`). Note: `402` was chosen as the nearest standard code to “payment needed”; it is a non-standard use of the code) |
 | `404 Not Found` | `customerId` (or a `productId` in `items`) does not exist | The referenced entity is unknown | Use an existing customer/product |
 | `422 Unprocessable Entity` | **No** single warehouse currently stocks every requested line in the requested quantity | This is a stock-availability *fact*, not a race: no candidate existed at all, so no order was recorded | Reduce quantity or choose different items; may genuinely resolve later |
 | `409 Conflict` | (a) every candidate for the order lost the reservation race, or (b) an `Idempotency-Key` was reused with a different payload | (a) The race window drained every warehouse between candidate selection and reservation: the order is **recorded** with `state: 'created'`, nothing reserved/charged, and the response message carries its id. (b) The key already maps to a different request | (a) Retry with a **new** `Idempotency-Key` (the same key will keep returning this recorded outcome). (b) This is a client bug — the key must describe exactly one request |
-| `200 OK` | An `Idempotency-Key` replay where the key and payload match an existing **active** order | Idempotent replay: no new order was created; the body is the original order (id unchanged, `state: 'active'`) | Nothing — treat as the same success |
+| `200 OK` | An `Idempotency-Key` replay where the key and payload match an existing order in a committed state | Idempotent replay: no new order was created; the body is the original order (id unchanged). `active` is returned as-is; a `reserved` order (crash between reservation and capture) is resumed — the idempotent capture re-runs and the reply is `active` | Nothing — treat as the same success |
 | `201 Created` | A new order was placed successfully | Stock reserved, warehouse assigned, payment approved; the body has `state: 'active'` | Nothing |
 
 The distinction worth keeping straight: **`422` is “there was never a
 candidate”, `409` is “there was, but a concurrent order beat us to it”**. Only
 the `409` records an order (as `created`), which is why its body — a message
-rather than an order object — points at a recorded id you can inspect.
+rather than an order object — points at a recorded id you can inspect. The
+`402` is the same philosophy applied to declined cards: a recorded `cancelled`
+order (with stock restored) rather than a silent rollback.
 
 Anything else (server faults, unavailable dependencies) surfaces as a `500`.
 

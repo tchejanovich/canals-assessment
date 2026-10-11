@@ -113,6 +113,13 @@
       "when": 1791737570454,
       "tag": "0015_add_order_state_and_idempotency_hash",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1791739628321,
+      "tag": "0016_add_reserved_and_cancelled_order_states",
+      "breakpoints": true
     }
   ]
 }

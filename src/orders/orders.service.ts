@@ -30,11 +30,13 @@ import { WarehousesService } from '../warehouses/warehouses.service.js';
 import type {
   CreateOrderAddress,
   CreateOrderDto,
+  CreateOrderItem,
 } from './dto/create-order.dto.js';
 import type {
   OrderItemResponse,
   OrderResponse,
 } from './dto/order-response.dto.js';
+import { OrderState } from './order-state.js';
 import type { PricedLineItem } from './orders.types.js';
 
 function normalizePart(value: string): string {
@@ -131,7 +133,20 @@ export class OrdersService {
     const totalAmount = subtotalAmount;
     const requestHash = this.computeIdempotencyRequestHash(dto);
 
-    let outcome: { order: Order; state: 'created' | 'active' };
+    // Phase 1 — one short transaction: persist the address, the order in state
+    // `created` and its line items, then walk the nearest-first candidates and
+    // reserve stock. A successful reserve flips the same row to `reserved` and
+    // assigns the warehouse, atomically with the decrement. If every candidate
+    // lost the race window the order stays `created` — nothing reserved,
+    // nothing charged — and the caller reports the recorded 409.
+    //
+    // Phase 2 — outside any transaction: capture the payment. The reservation
+    // commits BEFORE the (potentially slow) payment call, so inventory row
+    // locks are never held across it. A declined capture is compensated in its
+    // own transaction: the order flips to `cancelled` and the reserved stock
+    // is returned to inventory, both atomically and idempotently (the flip is
+    // guarded on `state = 'reserved'`, so a second run restores nothing).
+    let outcome: { order: Order; state: OrderState };
     try {
       outcome = await this.db.transaction(async (tx) => {
         const fingerprint = buildFingerprint(dto.address);
@@ -188,7 +203,7 @@ export class OrdersService {
             shippingLongitude: coordinates.longitude.toFixed(6),
             idempotencyKey: idempotencyKey,
             idempotencyRequestHash: requestHash,
-            state: 'created',
+            state: OrderState.Created,
           })
           .returning();
 
@@ -217,35 +232,23 @@ export class OrdersService {
             throw error;
           }
 
-          const [activated] = await tx
+          const [reserved] = await tx
             .update(orders)
-            .set({ state: 'active', warehouseId: warehouse.id })
+            .set({ state: OrderState.Reserved, warehouseId: warehouse.id })
             .where(eq(orders.id, order.id))
             .returning();
-          if (!activated) {
+          if (!reserved) {
             throw new ConflictException(
-              `Order ${order.id} disappeared before it could be activated`,
+              `Order ${order.id} disappeared before it could be reserved`,
             );
           }
 
-          const payment = await this.payments.charge({
-            creditCardNumber: dto.creditCardNumber,
-            amount: totalAmount,
-            description: `Order ${order.id} for customer ${dto.customerId}`,
-          });
-          if (!payment.approved) {
-            throw new HttpException(
-              'Payment was declined',
-              HttpStatus.PAYMENT_REQUIRED,
-            );
-          }
-
-          return { order: activated, state: 'active' };
+          return { order: reserved, state: OrderState.Reserved };
         }
 
         // Every candidate was exhausted by the race window: keep the order
         // (and the deduplicated address) and let the caller report the 409.
-        return { order, state: 'created' };
+        return { order, state: OrderState.Created };
       });
     } catch (error) {
       if (isUniqueViolation(error, 'orders_idempotency_key_unique')) {
@@ -262,13 +265,14 @@ export class OrdersService {
       throw error;
     }
 
-    if (outcome.state === 'created') {
+    if (outcome.state === OrderState.Created) {
       throw this.unfulfilledOrderConflict(outcome.order.id);
     }
 
+    const finalized = await this.finalizeReservedOrder(outcome.order, dto);
     return {
       order: this.toOrderResponse(
-        outcome.order,
+        finalized,
         pricedLineItems.map((line) => ({
           productId: line.product.id,
           sku: line.product.sku,
@@ -344,7 +348,11 @@ export class OrdersService {
 
   private async findIdempotentOrder(
     key: string,
-  ): Promise<{ order: OrderResponse; requestHash: string | null } | null> {
+  ): Promise<{
+    order: Order;
+    items: OrderItemResponse[];
+    requestHash: string | null;
+  } | null> {
     const rows = await this.db
       .select({ order: orders, item: orderItems })
       .from(orders)
@@ -357,11 +365,9 @@ export class OrdersService {
 
     const { order } = rows[0];
     return {
+      order,
       requestHash: order.idempotencyRequestHash,
-      order: this.toOrderResponse(
-        order,
-        rows.map((row) => this.toOrderItem(row.item)),
-      ),
+      items: rows.map((row) => this.toOrderItem(row.item)),
     };
   }
 
@@ -369,14 +375,22 @@ export class OrdersService {
    * Resolves what an idempotency-key replay should answer, or `null` when the
    * key has never been seen and a new order should be created:
    *
-   * - no stored order            -> `null`
-   * - stored order is `active`   -> the stored order (no duplicate created)
-   * - stored order is `created`  -> throws the recorded-creation conflict; the
-   *                                 key stays bound to that failed outcome
+   * - no stored order             -> `null`
+   * - stored order is `active`    -> the stored order (no duplicate created)
+   * - stored order is `reserved`  -> the original request committed the stock
+   *                                  reservation but never finished the (slow)
+   *                                  payment capture, or crashed doing so. The
+   *                                  replay RESUMES it: the capture is
+   *                                  idempotent per order, so re-running it is
+   *                                  safe, and the order is then finalized.
+   * - stored order is `cancelled` -> the original capture was declined and the
+   *                                  key stays bound to that failed outcome.
+   * - stored order is `created`   -> a recorded race loss; throws the recorded
+   *                                  conflict, key stays bound.
    *
-   * Either way, a replay whose payload differs from the stored request is a
-   * conflict — the stored order is never silently returned for a request it
-   * does not match.
+   * A replay whose payload differs from the stored request is always a conflict
+   * — the stored order is never silently returned for a request it does not
+   * match.
    */
   private async resolveIdempotentReplay(
     idempotencyKey: string,
@@ -388,10 +402,100 @@ export class OrdersService {
     }
 
     this.assertReplayMatchesPayload(existing.requestHash, dto, idempotencyKey);
-    if (existing.order.state !== 'active') {
-      throw this.unfulfilledOrderConflict(existing.order.id);
+
+    switch (existing.order.state) {
+      case OrderState.Active:
+        return this.toOrderResponse(existing.order, existing.items);
+      case OrderState.Reserved: {
+        const finalized = await this.finalizeReservedOrder(existing.order, dto);
+        return this.toOrderResponse(finalized, existing.items);
+      }
+      case OrderState.Cancelled:
+        throw new HttpException(
+          `Order ${existing.order.id} had its payment declined; it is recorded as '${OrderState.Cancelled}' ` +
+            `and any reserved stock was returned. Retry with a new idempotency key to attempt it again`,
+          HttpStatus.PAYMENT_REQUIRED,
+        );
+      default:
+        throw this.unfulfilledOrderConflict(existing.order.id);
     }
-    return existing.order;
+  }
+
+  /**
+   * Captures the payment for an order whose stock is already reserved, then
+   * finalizes it. RUNS OUTSIDE ANY TRANSACTION on purpose: the reservation
+   * committed before the (potentially slow) payment call so inventory row
+   * locks are never held across it. On approval the order is flipped to
+   * `active` in a tiny guarded transaction; on decline/failure the order is
+   * cancelled and the reserved stock returned, atomically and idempotently.
+   */
+  private async finalizeReservedOrder(
+    reservedOrder: Order,
+    dto: CreateOrderDto,
+  ): Promise<Order> {
+    const payment = await this.payments.charge({
+      creditCardNumber: dto.creditCardNumber,
+      amount: reservedOrder.totalAmount,
+      description: `Order ${reservedOrder.id} for customer ${reservedOrder.customerId}`,
+    });
+    if (!payment.approved) {
+      await this.cancelOrderAndRestoreStock(
+        reservedOrder.id,
+        reservedOrder.warehouseId!,
+        dto.items,
+      );
+      throw new HttpException(
+        'Payment was declined',
+        HttpStatus.PAYMENT_REQUIRED,
+      );
+    }
+
+    const [activated] = await this.db.transaction(async (tx) =>
+      tx
+        .update(orders)
+        .set({ state: OrderState.Active })
+        .where(and(eq(orders.id, reservedOrder.id), eq(orders.state, OrderState.Reserved)))
+        .returning(),
+    );
+    if (activated) {
+      return activated;
+    }
+
+    // Another flow already finalized this order (e.g. a concurrent replay);
+    // read the committed state so we report it accurately.
+    const [current] = await this.db
+      .select()
+      .from(orders)
+      .where(eq(orders.id, reservedOrder.id))
+      .limit(1);
+    return current ?? reservedOrder;
+  }
+
+  /**
+   * Compensation for a failed payment capture: flips the order from `reserved`
+   * to `cancelled` and returns the reserved stock to inventory, in one
+   * transaction. The guard on `state = 'reserved'` makes it idempotent — if a
+   * second caller runs it after the flip, it matches zero rows and restores
+   * nothing (no double restock).
+   */
+  private async cancelOrderAndRestoreStock(
+    orderId: number,
+    warehouseId: number,
+    items: CreateOrderItem[],
+  ): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      const [cancelled] = await tx
+        .update(orders)
+        .set({ state: OrderState.Cancelled })
+        .where(
+          and(eq(orders.id, orderId), eq(orders.state, OrderState.Reserved)),
+        )
+        .returning({ id: orders.id });
+
+      if (cancelled) {
+        await this.inventory.restore(tx, warehouseId, items);
+      }
+    });
   }
 
   /**
@@ -439,7 +543,7 @@ export class OrdersService {
   private unfulfilledOrderConflict(orderId: number): ConflictException {
     return new ConflictException(
       `Order ${orderId} could not be fulfilled (stock ran out at every nearby warehouse during reservation). ` +
-        `It is recorded with state 'created', no stock was reserved and nothing was charged. ` +
+        `It is recorded with state '${OrderState.Created}', no stock was reserved and nothing was charged. ` +
         `Retry with a new idempotency key to attempt it again`,
     );
   }

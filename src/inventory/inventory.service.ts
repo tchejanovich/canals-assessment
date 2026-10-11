@@ -45,4 +45,34 @@ export class InventoryService {
       }
     }
   }
+
+  /**
+   * Compensating restock: returns the quantity a prior `reserve` took, used
+   * when an order is cancelled after stock was reserved (e.g. the payment
+   * capture fails after the reservation committed). Unconditional — the order
+   * that calls it owns the reservation — but it keeps the same sorted order as
+   * `reserve` so lock acquisition stays globally consistent.
+   */
+  async restore(
+    tx: DatabaseTransaction,
+    warehouseId: number,
+    requests: StockRequest[],
+  ): Promise<void> {
+    const ordered = [...requests].sort((a, b) => a.productId - b.productId);
+
+    for (const request of ordered) {
+      await tx
+        .update(inventory)
+        .set({
+          quantity: sql`${inventory.quantity} + ${request.quantity}`,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(inventory.warehouseId, warehouseId),
+            eq(inventory.productId, request.productId),
+          ),
+        );
+    }
+  }
 }
