@@ -1,6 +1,6 @@
-import { ConflictException } from '@nestjs/common';
 import { buildAddressFingerprint } from '../addresses/address-fingerprint.js';
 import type { CreateOrderDto } from './dto/create-order.dto.js';
+import { IdempotencyKeyReusedError } from './orders.errors.js';
 
 /**
  * Pure idempotency helpers: fingerprint a request, compare a replay against the
@@ -67,8 +67,6 @@ export function assertReplayMatchesPayload(
     requestFingerprint !== null &&
     requestFingerprint !== computeIdempotencyRequestFingerprint(dto)
   ) {
-    throw new ConflictException(
-      `Idempotency key ${key} was already used with a different payload`,
-    );
+    throw new IdempotencyKeyReusedError(key);
   }
 }

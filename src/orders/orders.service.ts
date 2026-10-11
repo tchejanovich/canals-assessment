@@ -1,13 +1,4 @@
-import {
-  BadRequestException,
-  ConflictException,
-  HttpException,
-  HttpStatus,
-  Inject,
-  Injectable,
-  NotFoundException,
-  UnprocessableEntityException,
-} from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import { AddressesService } from '../addresses/addresses.service.js';
 import type { Coordinates } from '../common/geo.js';
@@ -25,6 +16,7 @@ import {
   type Product,
 } from '../db/schema/index.js';
 import { GeocodingService } from '../geocoding/geocoding.service.js';
+import { InsufficientStockError } from '../inventory/inventory.errors.js';
 import { InventoryService } from '../inventory/inventory.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
 import { ProductsService } from '../products/products.service.js';
@@ -41,6 +33,16 @@ import type {
   OrderItemResponse,
   OrderResponse,
 } from './dto/order-response.dto.js';
+import {
+  CustomerNotFoundError,
+  NoFulfillingWarehouseError,
+  OrderPaymentDeclinedError,
+  OrderVanishedError,
+  PaymentDeclinedError,
+  ProductNotFoundError,
+  ProductUnavailableError,
+  UnfulfilledOrderError,
+} from './orders.errors.js';
 import {
   assertReplayMatchesPayload,
   computeIdempotencyRequestFingerprint,
@@ -94,7 +96,7 @@ export class OrdersService {
 
     const customer = await this.customers.findById(dto.customerId);
     if (!customer) {
-      throw new NotFoundException(`Customer ${dto.customerId} not found`);
+      throw new CustomerNotFoundError(dto.customerId);
     }
 
     const productById = await this.resolveProductMap(dto);
@@ -118,9 +120,7 @@ export class OrdersService {
       WAREHOUSE_FALLBACK_ATTEMPTS,
     );
     if (candidates.length === 0) {
-      throw new UnprocessableEntityException(
-        'No single warehouse can fulfil the entire order',
-      );
+      throw new NoFulfillingWarehouseError();
     }
 
     const totalAmount = subtotalAmount;
@@ -185,7 +185,7 @@ export class OrdersService {
     }
 
     if (outcome.state === OrderState.Created) {
-      throw this.unfulfilledOrderConflict(outcome.order.id);
+      throw new UnfulfilledOrderError(outcome.order.id);
     }
 
     const finalized = await this.finalizeReservedOrder(outcome.order, dto);
@@ -255,9 +255,10 @@ export class OrdersService {
    * Walks the nearest-first warehouse candidates and atomically reserves stock
    * at the first one that still has it, flipping the order to `reserved` and
    * assigning that warehouse in the same transaction. A candidate that lost the
-   * race for stock throws a `ConflictException` from `inventory.reserve`, which
-   * is treated as "try the next-nearest". Returns `null` when every candidate
-   * was exhausted, leaving the order in `created` for the caller to report.
+   * race for stock throws an `InsufficientStockError` from `inventory.reserve`,
+   * which is treated as "try the next-nearest". Returns `null` when every
+   * candidate was exhausted, leaving the order in `created` for the caller to
+   * report.
    */
   private async tryReserveOrder(
     tx: DatabaseTransaction,
@@ -271,7 +272,7 @@ export class OrdersService {
       } catch (error) {
         // Stock ran out at this warehouse past candidate selection; fall
         // back to the next-nearest warehouse that could fulfil the order.
-        if (error instanceof ConflictException) {
+        if (error instanceof InsufficientStockError) {
           continue;
         }
         throw error;
@@ -283,9 +284,7 @@ export class OrdersService {
         .where(eq(orders.id, order.id))
         .returning();
       if (!reserved) {
-        throw new ConflictException(
-          `Order ${order.id} disappeared before it could be reserved`,
-        );
+        throw new OrderVanishedError(order.id);
       }
 
       return reserved;
@@ -307,12 +306,10 @@ export class OrdersService {
     for (const item of dto.items) {
       const product = productById.get(item.productId);
       if (!product) {
-        throw new NotFoundException(`Product ${item.productId} not found`);
+        throw new ProductNotFoundError(item.productId);
       }
       if (!product.active) {
-        throw new BadRequestException(
-          `Product ${item.productId} is not available`,
-        );
+        throw new ProductUnavailableError(item.productId);
       }
     }
 
@@ -386,13 +383,9 @@ export class OrdersService {
         return toOrderResponse(finalized, existing.items);
       }
       case OrderState.Cancelled:
-        throw new HttpException(
-          `Order ${existing.order.id} had its payment declined; it is recorded as '${OrderState.Cancelled}' ` +
-            `and any reserved stock was returned. Retry with a new idempotency key to attempt it again`,
-          HttpStatus.PAYMENT_REQUIRED,
-        );
+        throw new OrderPaymentDeclinedError(existing.order.id);
       default:
-        throw this.unfulfilledOrderConflict(existing.order.id);
+        throw new UnfulfilledOrderError(existing.order.id);
     }
   }
 
@@ -419,10 +412,7 @@ export class OrdersService {
         reservedOrder.warehouseId!,
         dto.items,
       );
-      throw new HttpException(
-        'Payment was declined',
-        HttpStatus.PAYMENT_REQUIRED,
-      );
+      throw new PaymentDeclinedError();
     }
 
     const activated = await this.activateOrder(reservedOrder.id, {
@@ -504,13 +494,5 @@ export class OrdersService {
         await this.inventory.restore(tx, warehouseId, items);
       }
     });
-  }
-
-  private unfulfilledOrderConflict(orderId: number): ConflictException {
-    return new ConflictException(
-      `Order ${orderId} could not be fulfilled (stock ran out at every nearby warehouse during reservation). ` +
-        `It is recorded with state '${OrderState.Created}', no stock was reserved and nothing was charged. ` +
-        `Retry with a new idempotency key to attempt it again`,
-    );
   }
 }

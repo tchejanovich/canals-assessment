@@ -1,6 +1,6 @@
-import { BadRequestException } from '@nestjs/common';
 import type { Product } from '../db/schema/index.js';
 import type { CreateOrderDto } from './dto/create-order.dto.js';
+import { MixedCurrencyError } from './orders.errors.js';
 import type { PricedLineItem } from './orders.types.js';
 
 /**
@@ -24,10 +24,7 @@ export function buildPricedLineItems(
 }
 
 export function calculateSubtotal(pricedLineItems: PricedLineItem[]): bigint {
-  return pricedLineItems.reduce(
-    (sum, line) => sum + line.lineTotalAmount,
-    0n,
-  );
+  return pricedLineItems.reduce((sum, line) => sum + line.lineTotalAmount, 0n);
 }
 
 export function validateAndResolveCurrency(
@@ -35,9 +32,7 @@ export function validateAndResolveCurrency(
 ): string {
   const currency = pricedLineItems[0].product.currency;
   if (pricedLineItems.some((line) => line.product.currency !== currency)) {
-    throw new BadRequestException(
-      'All products in an order must share the same currency',
-    );
+    throw new MixedCurrencyError();
   }
   return currency;
 }

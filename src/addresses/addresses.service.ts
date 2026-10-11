@@ -1,9 +1,4 @@
-import {
-  BadRequestException,
-  ConflictException,
-  Inject,
-  Injectable,
-} from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import {
   DATABASE,
@@ -17,6 +12,11 @@ import {
   regions,
 } from '../db/schema/index.js';
 import { buildAddressFingerprint } from './address-fingerprint.js';
+import {
+  AddressConflictError,
+  UnknownCountryError,
+  UnknownRegionError,
+} from './addresses.errors.js';
 import type { StoreAddressInput } from './addresses.types.js';
 
 @Injectable()
@@ -68,9 +68,7 @@ export class AddressesService {
       )[0];
 
     if (!address) {
-      throw new ConflictException(
-        'Address could not be stored despite a stable fingerprint',
-      );
+      throw new AddressConflictError();
     }
 
     return address;
@@ -86,7 +84,7 @@ export class AddressesService {
       .where(eq(countries.code, countryCode))
       .limit(1);
     if (!country) {
-      throw new BadRequestException(`Unknown country ${countryCode}`);
+      throw new UnknownCountryError(countryCode);
     }
     return country.id;
   }
@@ -104,7 +102,7 @@ export class AddressesService {
       )
       .limit(1);
     if (!region) {
-      throw new BadRequestException(`Unknown region ${regionCode}`);
+      throw new UnknownRegionError(regionCode);
     }
     return region.id;
   }

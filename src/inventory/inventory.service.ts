@@ -1,4 +1,4 @@
-import { ConflictException, Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, gte, sql } from 'drizzle-orm';
 import {
   DATABASE,
@@ -6,6 +6,7 @@ import {
   type DatabaseTransaction,
 } from '../db/database.module.js';
 import { inventory } from '../db/schema/index.js';
+import { InsufficientStockError } from './inventory.errors.js';
 import type { StockRequest } from './inventory.types.js';
 
 @Injectable()
@@ -39,9 +40,7 @@ export class InventoryService {
         .returning({ id: inventory.id });
 
       if (updated.length !== 1) {
-        throw new ConflictException(
-          `Insufficient stock for product ${request.productId}`,
-        );
+        throw new InsufficientStockError(request.productId);
       }
     }
   }
