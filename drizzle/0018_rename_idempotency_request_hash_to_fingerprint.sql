@@ -1,0 +1,1 @@
+ALTER TABLE "orders" RENAME COLUMN "idempotency_request_hash" TO "idempotency_request_fingerprint";

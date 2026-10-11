@@ -1,5 +1,4 @@
 import { ConflictException } from '@nestjs/common';
-import { createHash } from 'node:crypto';
 import { buildAddressFingerprint } from '../addresses/address-fingerprint.js';
 import type { CreateOrderDto } from './dto/create-order.dto.js';
 
@@ -31,12 +30,16 @@ export function isUniqueViolation(error: unknown, constraint: string): boolean {
 }
 
 /**
- * Returns the canonical hash of the parts of the request that determine the
- * order (customer, address and line items). The credit card is deliberately
- * excluded — it does not change what the order IS, only how it is paid for.
+ * Returns a canonical string identifying the full request payload. The object
+ * is built with a fixed key order and the items are sorted, so `JSON.stringify`
+ * is deterministic and byte-comparable. The credit card is included because the
+ * fingerprint must only match a replay that is identical in every respect.
  */
-export function computeIdempotencyRequestHash(dto: CreateOrderDto): string {
+export function computeIdempotencyRequestFingerprint(
+  dto: CreateOrderDto,
+): string {
   const canonicalPayload = {
+    creditCardNumber: dto.creditCardNumber,
     customerId: dto.customerId,
     address: buildAddressFingerprint(dto.address),
     items: [...dto.items]
@@ -46,9 +49,7 @@ export function computeIdempotencyRequestHash(dto: CreateOrderDto): string {
         quantity: item.quantity,
       })),
   };
-  return createHash('sha256')
-    .update(JSON.stringify(canonicalPayload))
-    .digest('hex');
+  return JSON.stringify(canonicalPayload);
 }
 
 /**
@@ -58,13 +59,13 @@ export function computeIdempotencyRequestHash(dto: CreateOrderDto): string {
  * a stored order that no longer matches what the client asked for.
  */
 export function assertReplayMatchesPayload(
-  requestHash: string | null,
+  requestFingerprint: string | null,
   dto: CreateOrderDto,
   key: string,
 ): void {
   if (
-    requestHash !== null &&
-    requestHash !== computeIdempotencyRequestHash(dto)
+    requestFingerprint !== null &&
+    requestFingerprint !== computeIdempotencyRequestFingerprint(dto)
   ) {
     throw new ConflictException(
       `Idempotency key ${key} was already used with a different payload`,

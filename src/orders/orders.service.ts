@@ -43,7 +43,7 @@ import type {
 } from './dto/order-response.dto.js';
 import {
   assertReplayMatchesPayload,
-  computeIdempotencyRequestHash,
+  computeIdempotencyRequestFingerprint,
   isUniqueViolation,
 } from './orders.idempotency.js';
 import {
@@ -124,8 +124,8 @@ export class OrdersService {
     }
 
     const totalAmount = subtotalAmount;
-    const requestHash = idempotencyKey
-      ? computeIdempotencyRequestHash(dto)
+    const requestFingerprint = idempotencyKey
+      ? computeIdempotencyRequestFingerprint(dto)
       : null;
 
     let outcome: { order: Order; state: OrderState };
@@ -148,7 +148,7 @@ export class OrdersService {
           totalAmount,
           currency,
           idempotencyKey: idempotencyKey ?? null,
-          idempotencyRequestHash: requestHash,
+          idempotencyRequestFingerprint: requestFingerprint,
           pricedLineItems,
         });
 
@@ -208,7 +208,7 @@ export class OrdersService {
       totalAmount: bigint;
       currency: string;
       idempotencyKey: string | null;
-      idempotencyRequestHash: string | null;
+      idempotencyRequestFingerprint: string | null;
       pricedLineItems: PricedLineItem[];
     },
   ): Promise<Order> {
@@ -230,7 +230,7 @@ export class OrdersService {
         shippingLatitude: input.coordinates.latitude.toFixed(6),
         shippingLongitude: input.coordinates.longitude.toFixed(6),
         idempotencyKey: input.idempotencyKey,
-        idempotencyRequestHash: input.idempotencyRequestHash,
+        idempotencyRequestFingerprint: input.idempotencyRequestFingerprint,
         state: OrderState.Created,
       })
       .returning();
@@ -322,7 +322,7 @@ export class OrdersService {
   private async findIdempotentOrder(key: string): Promise<{
     order: Order;
     items: OrderItemResponse[];
-    requestHash: string | null;
+    requestFingerprint: string | null;
   } | null> {
     const rows = await this.db
       .select({ order: orders, item: orderItems })
@@ -337,7 +337,7 @@ export class OrdersService {
     const { order } = rows[0];
     return {
       order,
-      requestHash: order.idempotencyRequestHash,
+      requestFingerprint: order.idempotencyRequestFingerprint,
       items: rows.map((row) => toOrderItem(row.item)),
     };
   }
@@ -372,7 +372,11 @@ export class OrdersService {
       return null;
     }
 
-    assertReplayMatchesPayload(existing.requestHash, dto, idempotencyKey);
+    assertReplayMatchesPayload(
+      existing.requestFingerprint,
+      dto,
+      idempotencyKey,
+    );
 
     switch (existing.order.state) {
       case OrderState.Active:

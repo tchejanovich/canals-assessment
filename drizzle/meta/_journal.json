@@ -127,6 +127,13 @@
       "when": 1791743555449,
       "tag": "0017_add_payments",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1791747310625,
+      "tag": "0018_rename_idempotency_request_hash_to_fingerprint",
+      "breakpoints": true
     }
   ]
 }

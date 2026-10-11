@@ -56,7 +56,7 @@ export const orders = pgTable(
       scale: 6,
     }).notNull(),
     idempotencyKey: text('idempotency_key'),
-    idempotencyRequestHash: text('idempotency_request_hash'),
+    idempotencyRequestFingerprint: text('idempotency_request_fingerprint'),
     state: orderState('state').notNull().default(OrderState.Active),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
