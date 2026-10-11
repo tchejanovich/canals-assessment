@@ -252,13 +252,13 @@ export class OrdersService {
   }
 
   /**
-   * Walks the nearest-first warehouse candidates and atomically reserves stock
-   * at the first one that still has it, flipping the order to `reserved` and
-   * assigning that warehouse in the same transaction. A candidate that lost the
-   * race for stock throws an `InsufficientStockError` from `inventory.reserve`,
-   * which is treated as "try the next-nearest". Returns `null` when every
-   * candidate was exhausted, leaving the order in `created` for the caller to
-   * report.
+   * Walks the nearest-first warehouse candidates and reserves stock at the
+   * first one that still has every line, flipping the order to `reserved` and
+   * assigning that warehouse in the same outer transaction. Each attempt runs
+   * in a nested transaction (a savepoint): `reserve` decrements line by line,
+   * so a mid-list `InsufficientStockError` must roll back that warehouse's
+   * partial decrements without aborting the order insert. Returns `null` when
+   * every candidate was exhausted, leaving the order in `created`.
    */
   private async tryReserveOrder(
     tx: DatabaseTransaction,
@@ -268,26 +268,26 @@ export class OrdersService {
   ): Promise<Order | null> {
     for (const warehouse of candidates) {
       try {
-        await this.inventory.reserve(tx, warehouse.id, items);
+        return await tx.transaction(async (inner) => {
+          await this.inventory.reserve(inner, warehouse.id, items);
+
+          const [reserved] = await inner
+            .update(orders)
+            .set({ state: OrderState.Reserved, warehouseId: warehouse.id })
+            .where(eq(orders.id, order.id))
+            .returning();
+          if (!reserved) {
+            throw new OrderVanishedError(order.id);
+          }
+
+          return reserved;
+        });
       } catch (error) {
-        // Stock ran out at this warehouse past candidate selection; fall
-        // back to the next-nearest warehouse that could fulfil the order.
         if (error instanceof InsufficientStockError) {
           continue;
         }
         throw error;
       }
-
-      const [reserved] = await tx
-        .update(orders)
-        .set({ state: OrderState.Reserved, warehouseId: warehouse.id })
-        .where(eq(orders.id, order.id))
-        .returning();
-      if (!reserved) {
-        throw new OrderVanishedError(order.id);
-      }
-
-      return reserved;
     }
 
     return null;
