@@ -6,11 +6,7 @@ import {
   type DatabaseTransaction,
 } from '../db/database.module.js';
 import { inventory } from '../db/schema/index.js';
-
-export interface StockRequest {
-  productId: number;
-  quantity: number;
-}
+import type { StockRequest } from './inventory.types.js';
 
 @Injectable()
 export class InventoryService {
@@ -21,7 +17,12 @@ export class InventoryService {
     warehouseId: number,
     requests: StockRequest[],
   ): Promise<void> {
-    for (const request of requests) {
+    // Lock inventory rows in a globally consistent order so concurrent
+    // orders sharing products never acquire row locks in opposite order
+    // (a classic deadlock even when every single row is stock-sufficient).
+    const ordered = [...requests].sort((a, b) => a.productId - b.productId);
+
+    for (const request of ordered) {
       const updated = await tx
         .update(inventory)
         .set({

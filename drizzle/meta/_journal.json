@@ -92,6 +92,13 @@
       "when": 1791687957748,
       "tag": "0012_add_order_idempotency_key",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1791730187518,
+      "tag": "0013_add_warehouse_postgis_location",
+      "breakpoints": true
     }
   ]
 }

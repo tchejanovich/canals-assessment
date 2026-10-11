@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   HttpException,
   HttpStatus,
   Inject,
@@ -68,6 +69,15 @@ function isUniqueViolation(error: unknown, constraint: string): boolean {
   );
 }
 
+/**
+ * How many nearest-first warehouses are tried before giving up. Candidates
+ * are ordered by distance; stock is re-checked under lock at reservation
+ * time, so a concurrent order can drain a warehouse between candidate
+ * selection and reservation, in which case the next-nearest candidate is
+ * attempted.
+ */
+const WAREHOUSE_FALLBACK_ATTEMPTS = 5;
+
 @Injectable()
 export class OrdersService {
   constructor(
@@ -108,11 +118,12 @@ export class OrdersService {
 
     const coordinates = await this.geocoding.getCoordinates(dto.address);
 
-    const warehouse = await this.warehouses.findNearestWithStock(
+    const candidates = await this.warehouses.findFulfillingWarehouses(
       dto.items,
       coordinates,
+      WAREHOUSE_FALLBACK_ATTEMPTS,
     );
-    if (!warehouse) {
+    if (candidates.length === 0) {
       throw new UnprocessableEntityException(
         'No single warehouse can fulfil the entire order',
       );
@@ -120,105 +131,116 @@ export class OrdersService {
 
     const totalAmount = subtotalAmount;
 
-    try {
-      const created = await this.db.transaction(async (tx) => {
-        await this.inventory.reserve(tx, warehouse.id, dto.items);
+    for (const warehouse of candidates) {
+      try {
+        const created = await this.db.transaction(async (tx) => {
+          await this.inventory.reserve(tx, warehouse.id, dto.items);
 
-        const [address] = await tx
-          .insert(addresses)
-          .values({
-            customerId: dto.customerId,
-            line1: dto.address.line1,
-            line2: dto.address.line2 ?? null,
-            city: dto.address.city,
-            regionId,
-            postalCode: dto.address.postalCode,
-            countryId,
-            latitude: coordinates.latitude.toFixed(6),
-            longitude: coordinates.longitude.toFixed(6),
-            fingerprint: buildFingerprint(dto.address),
-          })
-          .onConflictDoUpdate({
-            target: addresses.fingerprint,
-            set: { updatedAt: new Date() },
-          })
-          .returning();
+          const [address] = await tx
+            .insert(addresses)
+            .values({
+              customerId: dto.customerId,
+              line1: dto.address.line1,
+              line2: dto.address.line2 ?? null,
+              city: dto.address.city,
+              regionId,
+              postalCode: dto.address.postalCode,
+              countryId,
+              latitude: coordinates.latitude.toFixed(6),
+              longitude: coordinates.longitude.toFixed(6),
+              fingerprint: buildFingerprint(dto.address),
+            })
+            .onConflictDoUpdate({
+              target: addresses.fingerprint,
+              set: { updatedAt: new Date() },
+            })
+            .returning();
 
-        const [order] = await tx
-          .insert(orders)
-          .values({
-            customerId: dto.customerId,
-            warehouseId: warehouse.id,
-            shippingAddressId: address.id,
-            subtotalAmount,
-            totalAmount,
-            currency,
-            shippingLine1: dto.address.line1,
-            shippingLine2: dto.address.line2 ?? null,
-            shippingCity: dto.address.city,
-            shippingRegion: dto.address.region,
-            shippingPostalCode: dto.address.postalCode,
-            shippingCountry: dto.address.country,
-            shippingLatitude: coordinates.latitude.toFixed(6),
-            shippingLongitude: coordinates.longitude.toFixed(6),
-            idempotencyKey: idempotencyKey ?? null,
-          })
-          .returning();
+          const [order] = await tx
+            .insert(orders)
+            .values({
+              customerId: dto.customerId,
+              warehouseId: warehouse.id,
+              shippingAddressId: address.id,
+              subtotalAmount,
+              totalAmount,
+              currency,
+              shippingLine1: dto.address.line1,
+              shippingLine2: dto.address.line2 ?? null,
+              shippingCity: dto.address.city,
+              shippingRegion: dto.address.region,
+              shippingPostalCode: dto.address.postalCode,
+              shippingCountry: dto.address.country,
+              shippingLatitude: coordinates.latitude.toFixed(6),
+              shippingLongitude: coordinates.longitude.toFixed(6),
+              idempotencyKey: idempotencyKey ?? null,
+            })
+            .returning();
 
-        await tx.insert(orderItems).values(
-          pricedLineItems.map((line) => ({
-            orderId: order.id,
-            productId: line.product.id,
-            productName: line.product.name,
-            sku: line.product.sku,
-            unitPriceAmount: line.unitPriceAmount,
-            quantity: line.quantity,
-            lineTotalAmount: line.lineTotalAmount,
-            currency,
-          })),
-        );
-
-        const payment = await this.payments.charge({
-          creditCardNumber: dto.creditCardNumber,
-          amount: totalAmount,
-          description: `Order ${order.id} for customer ${dto.customerId}`,
-        });
-        if (!payment.approved) {
-          throw new HttpException(
-            'Payment was declined',
-            HttpStatus.PAYMENT_REQUIRED,
+          await tx.insert(orderItems).values(
+            pricedLineItems.map((line) => ({
+              orderId: order.id,
+              productId: line.product.id,
+              productName: line.product.name,
+              sku: line.product.sku,
+              unitPriceAmount: line.unitPriceAmount,
+              quantity: line.quantity,
+              lineTotalAmount: line.lineTotalAmount,
+              currency,
+            })),
           );
-        }
 
-        return order;
-      });
+          const payment = await this.payments.charge({
+            creditCardNumber: dto.creditCardNumber,
+            amount: totalAmount,
+            description: `Order ${order.id} for customer ${dto.customerId}`,
+          });
+          if (!payment.approved) {
+            throw new HttpException(
+              'Payment was declined',
+              HttpStatus.PAYMENT_REQUIRED,
+            );
+          }
 
-      return {
-        order: this.toOrderResponse(
-          created,
-          pricedLineItems.map((line) => ({
-            productId: line.product.id,
-            sku: line.product.sku,
-            name: line.product.name,
-            quantity: line.quantity,
-            unitPriceAmount: line.unitPriceAmount.toString(),
-            lineTotalAmount: line.lineTotalAmount.toString(),
-          })),
-        ),
-        created: true,
-      };
-    } catch (error) {
-      if (
-        idempotencyKey &&
-        isUniqueViolation(error, 'orders_idempotency_key_unique')
-      ) {
-        const existing = await this.findByIdempotencyKey(idempotencyKey);
-        if (existing) {
-          return { order: existing, created: false };
+          return order;
+        });
+
+        return {
+          order: this.toOrderResponse(
+            created,
+            pricedLineItems.map((line) => ({
+              productId: line.product.id,
+              sku: line.product.sku,
+              name: line.product.name,
+              quantity: line.quantity,
+              unitPriceAmount: line.unitPriceAmount.toString(),
+              lineTotalAmount: line.lineTotalAmount.toString(),
+            })),
+          ),
+          created: true,
+        };
+      } catch (error) {
+        if (
+          idempotencyKey &&
+          isUniqueViolation(error, 'orders_idempotency_key_unique')
+        ) {
+          const existing = await this.findByIdempotencyKey(idempotencyKey);
+          if (existing) {
+            return { order: existing, created: false };
+          }
         }
+        if (error instanceof ConflictException) {
+          // Stock ran out at this warehouse past candidate selection; fall
+          // back to the next-nearest warehouse that could fulfil the order.
+          continue;
+        }
+        throw error;
       }
-      throw error;
     }
+
+    throw new ConflictException(
+      'Insufficient stock to fulfil the order at any nearby warehouse',
+    );
   }
 
   private async resolveProductMap(

@@ -27,6 +27,40 @@
 
 ## Technical decisions
 
+### Language and framework
+
+**TypeScript on NestJS, to match the company's stack**
+
+The service is written in TypeScript on NestJS, and the deciding factor is that
+Canals already builds on this stack. Writing the assessment in the language and
+framework the company actually runs means the code, conventions and design
+decisions here transfer directly to production work rather than living as a
+throwaway prototype, and it is what the team reviewing it can read, extend and
+deploy without a translation layer.
+
+Independent of that, NestJS fits this service well: its dependency-injection and
+module system made the external integrations (geocoding, payments) swappable
+mocks behind typed interfaces with no change to callers, and the framework's
+opinionated structure keeps the HTTP, service and persistence layers clearly
+separated.
+
+**Drizzle ORM over a heavier ORM**
+
+Drizzle was chosen over a heavier, more abstract ORM (or a plain query builder)
+because this service leans on PostgreSQL-specific features that an abstraction
+would fight rather than help with:
+
+- The schema is defined once in TypeScript and is the single source of truth for
+  both the types and the generated migrations, so schema drift and hand-written
+  DDL are avoided.
+- The queries are intentionally close to SQL — `VALUES` joins, the atomic
+  conditional `UPDATE ... WHERE quantity >= ?` that prevents overselling, and the
+  PostGIS nearest-neighbour operators. Drizzle composes raw SQL with typed
+  columns instead of hiding those capabilities, so the concurrency and
+  distance-ranking logic is expressed directly and can be reviewed as SQL.
+- It adds no runtime metadata/reflection layer, keeping the persistence boundary
+  thin and predictable.
+
 ### Database
 
 **Countries and regions live in their own tables**
@@ -65,6 +99,95 @@ table:
 Because orders snapshot the chosen shipping address at purchase time, later edits
 to a customer's `addresses` row (or an update to a warehouse's inline address) do
 not rewrite historical order data.
+
+**Nearest-warehouse selection uses PostGIS**
+
+An order must be fulfilled from a single warehouse, so the service ranks the
+warehouses that stock *every* requested product by distance to the shipping
+address. That ranking is done in the database with PostGIS rather than by
+fetching candidates and computing distances in application code:
+
+- Warehouse coordinates are mirrored into a `geography(Point, 4326)` column
+  (`warehouses.location`) backed by a GiST index. `latitude`/`longitude` stay the
+  writable source of truth; `location` is a generated, read-only shadow that
+  Postgres rebuilds automatically whenever either coordinate changes, so the two
+  can never drift and the spatial type never leaks into the application layer.
+- `geography` (rather than `geometry`) computes distances on the WGS84 spheroid
+  in metres, and the GiST index supports the `<->` nearest-neighbour operator, so
+  `ORDER BY location <-> :origin` walks the index nearest-first instead of
+  measuring every warehouse.
+- Ranking is split into two queries — first the stock filter
+  (`GROUP BY ... HAVING COUNT(*) = n`), then distance ordering over the survivors.
+  The reason is non-obvious and planner-specific, so it is explained in full
+  below.
+- The result is a nearest-first *list*, not a single pick. Stock is re-checked
+  under a row lock at reservation time, so when two orders race for the same
+  warehouse the loser falls back to the next-nearest candidate that can still
+  fulfil the order rather than failing outright.
+- The migration that adds the column also runs `CREATE EXTENSION postgis`, so a
+  fresh database provisions the extension automatically.
+
+**Why the candidate ranking is two queries, not one**
+
+The obvious way to write the ranking is a single query that filters on stock and
+orders by distance at once:
+
+```sql
+SELECT w.id
+FROM warehouses w
+JOIN inventory i ON i.warehouse_id = w.id
+JOIN (VALUES ...) AS req(product_id, quantity) ON req.product_id = i.product_id
+WHERE w.active AND i.quantity >= req.quantity
+GROUP BY w.id, w.location
+HAVING COUNT(*) = :n
+ORDER BY w.location <-> :origin
+LIMIT :k;
+```
+
+This silently loses the index. The `<->` nearest-neighbour optimisation only
+applies when `ORDER BY <->` is the top-level ordering of a *scan*; a `GROUP BY`
+forces the rows to be aggregated first, so the ordering becomes a sort over the
+aggregated result and the GiST index is bypassed. `EXPLAIN` on a 5,000-row table
+confirms it — the plan is `Limit -> Sort -> HashAggregate -> Hash Join ->
+Seq Scan`, with no `Index Scan using ..._gist`, i.e. every fulfilling warehouse
+is measured and sorted.
+
+Splitting keeps the ranking step a plain scan
+(`WHERE id = ANY(:ids) ORDER BY location <-> :origin LIMIT :k`), which the planner
+serves with the GiST index:
+
+```text
+Limit
+  -> Index Scan using warehouses_location_gist_idx on warehouses
+       Order By: (location <-> :origin)
+```
+
+so `LIMIT` stops after visiting the nearest candidates instead of measuring and
+sorting every fulfilling warehouse. The trade-off is a second round trip, and at
+a handful of warehouses the planner may just sort anyway — the split is a
+scalability hedge rather than a change you can feel at this size.
+
+The one-query form *can* keep the index if the stock test is written as a per-row
+predicate (no aggregation) instead of a `GROUP BY`:
+
+```sql
+SELECT w.id
+FROM warehouses w
+WHERE w.active AND NOT EXISTS (
+  SELECT 1 FROM (VALUES ...) AS req(product_id, quantity)
+  WHERE NOT EXISTS (
+    SELECT 1 FROM inventory i
+    WHERE i.warehouse_id = w.id AND i.product_id = req.product_id
+      AND i.quantity >= req.quantity
+  )
+)
+ORDER BY w.location <-> :origin
+LIMIT :k;
+```
+
+which plans as `Limit -> Nested Loop Anti Join -> Index Scan using ..._gist
+... Order By`. So the split is not strictly required; it is simply the clearer of
+the two index-preserving shapes.
 
 ### Mocks
 

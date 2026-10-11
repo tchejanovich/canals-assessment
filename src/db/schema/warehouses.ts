@@ -1,6 +1,8 @@
+import { sql } from 'drizzle-orm';
 import {
   bigint,
   boolean,
+  customType,
   index,
   numeric,
   pgTable,
@@ -11,11 +13,26 @@ import { countries } from './countries.js';
 import { regions } from './regions.js';
 
 /**
+ * PostGIS geography point (WGS84 / SRID 4326). Stored as `geography` rather
+ * than `geometry` so distances are computed on the spheroid in metres.
+ */
+const geographyPoint = customType<{ data: string }>({
+  dataType() {
+    return 'geography(Point, 4326)';
+  },
+});
+
+/**
  * A fulfilment location. Orders are always fulfilled from a single warehouse,
  * so coordinates are stored for the nearest-warehouse calculation. The address
  * is an intrinsic, single (1:1) attribute of the facility, so it is embedded
  * here rather than shared with the customer-oriented `addresses` table.
  * `countryId` and `regionId` reference the country/region reference tables.
+ *
+ * `latitude`/`longitude` remain the source of truth (writable, portable).
+ * `location` is a derived, read-only shadow of those two columns that exists
+ * solely so a GiST index can serve nearest-neighbour (`<->`) queries; it is
+ * rebuilt automatically by Postgres whenever either coordinate changes.
  */
 export const warehouses = pgTable(
   'warehouses',
@@ -36,6 +53,9 @@ export const warehouses = pgTable(
       .references(() => countries.id, { onDelete: 'restrict' }),
     latitude: numeric('latitude', { precision: 9, scale: 6 }).notNull(),
     longitude: numeric('longitude', { precision: 9, scale: 6 }).notNull(),
+    location: geographyPoint('location').generatedAlwaysAs(
+      sql`ST_SetSRID(ST_MakePoint("longitude"::double precision, "latitude"::double precision), 4326)::geography`,
+    ),
     active: boolean('active').notNull().default(true),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
@@ -45,7 +65,7 @@ export const warehouses = pgTable(
       .defaultNow(),
   },
   (table) => [
-    index('warehouses_coordinates_idx').on(table.latitude, table.longitude),
+    index('warehouses_location_gist_idx').using('gist', table.location),
     index('warehouses_country_id_idx').on(table.countryId),
     index('warehouses_region_id_idx').on(table.regionId),
   ],
