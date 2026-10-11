@@ -27,9 +27,6 @@ export const regions = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true })
-      .notNull()
-      .defaultNow(),
   },
   (table) => [
     uniqueIndex('regions_country_id_code_unique').on(

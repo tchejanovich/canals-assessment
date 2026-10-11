@@ -99,6 +99,13 @@
       "when": 1791730187518,
       "tag": "0013_add_warehouse_postgis_location",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1791736127444,
+      "tag": "0014_drop_updated_at_audit_columns",
+      "breakpoints": true
     }
   ]
 }

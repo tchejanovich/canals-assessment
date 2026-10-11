@@ -43,9 +43,6 @@ export const addresses = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true })
-      .notNull()
-      .defaultNow(),
   },
   (table) => [
     uniqueIndex('addresses_fingerprint_unique').on(table.fingerprint),

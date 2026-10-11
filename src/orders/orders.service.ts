@@ -136,7 +136,13 @@ export class OrdersService {
         const created = await this.db.transaction(async (tx) => {
           await this.inventory.reserve(tx, warehouse.id, dto.items);
 
-          const [address] = await tx
+          const fingerprint = buildFingerprint(dto.address);
+
+          // Address rows are de-duplicated by their normalised fingerprint and
+          // are otherwise immutable, so on conflict there is nothing to update:
+          // DO NOTHING (no write) and a fallback SELECT pick up the existing
+          // row when another order won the insert race.
+          const inserted = await tx
             .insert(addresses)
             .values({
               customerId: dto.customerId,
@@ -148,13 +154,24 @@ export class OrdersService {
               countryId,
               latitude: coordinates.latitude.toFixed(6),
               longitude: coordinates.longitude.toFixed(6),
-              fingerprint: buildFingerprint(dto.address),
+              fingerprint,
             })
-            .onConflictDoUpdate({
-              target: addresses.fingerprint,
-              set: { updatedAt: new Date() },
-            })
+            .onConflictDoNothing({ target: addresses.fingerprint })
             .returning();
+
+          const address =
+            inserted[0] ??
+            (await tx
+              .select()
+              .from(addresses)
+              .where(eq(addresses.fingerprint, fingerprint))
+              .limit(1))[0];
+
+          if (!address) {
+            throw new ConflictException(
+              'Address could not be stored despite a stable fingerprint',
+            );
+          }
 
           const [order] = await tx
             .insert(orders)

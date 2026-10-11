@@ -55,9 +55,6 @@ export const orders = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true })
-      .notNull()
-      .defaultNow(),
   },
   (table) => [
     index('orders_customer_id_idx').on(table.customerId),
