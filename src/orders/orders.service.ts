@@ -47,7 +47,11 @@ import {
   computeIdempotencyRequestHash,
   isUniqueViolation,
 } from './orders.idempotency.js';
-import { toOrderItem, toOrderResponse } from './orders.mapper.js';
+import {
+  toCreatedOrderResult,
+  toOrderItem,
+  toOrderResponse,
+} from './orders.mapper.js';
 import {
   buildPricedLineItems,
   calculateSubtotal,
@@ -176,20 +180,7 @@ export class OrdersService {
     }
 
     const finalized = await this.finalizeReservedOrder(outcome.order, dto);
-    return {
-      order: toOrderResponse(
-        finalized,
-        pricedLineItems.map((line) => ({
-          productId: line.product.id,
-          sku: line.product.sku,
-          name: line.product.name,
-          quantity: line.quantity,
-          unitPriceAmount: line.unitPriceAmount.toString(),
-          lineTotalAmount: line.lineTotalAmount.toString(),
-        })),
-      ),
-      created: true,
-    };
+    return toCreatedOrderResult(finalized, pricedLineItems);
   }
 
   /**
@@ -446,7 +437,9 @@ export class OrdersService {
       tx
         .update(orders)
         .set({ state: OrderState.Active })
-        .where(and(eq(orders.id, orderId), eq(orders.state, OrderState.Reserved)))
+        .where(
+          and(eq(orders.id, orderId), eq(orders.state, OrderState.Reserved)),
+        )
         .returning(),
     );
 

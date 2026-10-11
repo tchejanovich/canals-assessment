@@ -3,6 +3,7 @@ import type {
   OrderItemResponse,
   OrderResponse,
 } from './dto/order-response.dto.js';
+import type { PricedLineItem } from './orders.types.js';
 
 /**
  * Pure mapping from persisted rows to the API response shape. No I/O and no
@@ -17,6 +18,24 @@ export function toOrderItem(item: OrderItem): OrderItemResponse {
     quantity: item.quantity,
     unitPriceAmount: item.unitPriceAmount.toString(),
     lineTotalAmount: item.lineTotalAmount.toString(),
+  };
+}
+
+/**
+ * Maps a freshly priced line item to its wire shape. Used on the create path,
+ * where the response must reflect the just-computed prices rather than a
+ * later read of the persisted rows.
+ */
+function toOrderItemFromPricedLineItem(
+  line: PricedLineItem,
+): OrderItemResponse {
+  return {
+    productId: line.product.id,
+    sku: line.product.sku,
+    name: line.product.name,
+    quantity: line.quantity,
+    unitPriceAmount: line.unitPriceAmount.toString(),
+    lineTotalAmount: line.lineTotalAmount.toString(),
   };
 }
 
@@ -44,5 +63,23 @@ export function toOrderResponse(
     },
     items,
     createdAt: order.createdAt.toISOString(),
+  };
+}
+
+/**
+ * Builds the full create-order result `{ order, created: true }` for a freshly
+ * finalized order, so the service returns a single mapped value instead of
+ * assembling the response hash itself.
+ */
+export function toCreatedOrderResult(
+  order: Order,
+  pricedLineItems: PricedLineItem[],
+): { order: OrderResponse; created: boolean } {
+  return {
+    order: toOrderResponse(
+      order,
+      pricedLineItems.map(toOrderItemFromPricedLineItem),
+    ),
+    created: true,
   };
 }
