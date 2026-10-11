@@ -452,6 +452,27 @@ $ npm run test:cov
 
 When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
 
+To build the Docker image and push it to the `canals-api` ECR repository in
+`us-east-2`, with AWS CLI credentials already configured, run:
+
+```bash
+AWS_REGION=us-east-2 ECR_REPOSITORY=canals-api ./scripts/deploy-ecr.sh
+```
+
+To also update an ECS service, pass the service name to `deploy-ecs.sh`. Set
+`ECS_CLUSTER` if the service is not in the `default` cluster:
+
+```bash
+AWS_REGION=us-east-2 \
+ECR_REPOSITORY=canals-api \
+ECS_CLUSTER=canals-cluster \
+./scripts/deploy-ecs.sh canals-service
+```
+
+The ECS script invokes `deploy-ecr.sh`, creates a task definition revision with
+the new image, updates the service, and waits for the service to become stable.
+It requires the AWS CLI, Docker, and `jq`.
+
 If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
 
 ```bash
