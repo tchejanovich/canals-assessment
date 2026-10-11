@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { and, eq, ne } from 'drizzle-orm';
+import { and, asc, eq, ne } from 'drizzle-orm';
 import { AddressesService } from '../addresses/addresses.service.js';
 import type { Coordinates } from '../common/geo.js';
 import { CustomersService } from '../customers/customers.service.js';
@@ -39,6 +39,7 @@ import type {
 import {
   CustomerNotFoundError,
   NoFulfillingWarehouseError,
+  OrderNotFoundError,
   OrderPaymentDeclinedError,
   OrderVanishedError,
   PaymentCaptureFailedError,
@@ -110,6 +111,25 @@ export class OrdersService {
     private readonly inventory: InventoryService,
     private readonly payments: PaymentsService,
   ) {}
+
+  async getOrderById(orderId: number): Promise<OrderResponse> {
+    const rows = await this.db
+      .select({ order: orders, item: orderItems })
+      .from(orders)
+      .leftJoin(orderItems, eq(orderItems.orderId, orders.id))
+      .where(eq(orders.id, orderId))
+      .orderBy(asc(orderItems.id));
+
+    const firstRow = rows[0];
+    if (!firstRow) {
+      throw new OrderNotFoundError(orderId);
+    }
+
+    const items = rows.flatMap((row) =>
+      row.item ? [toOrderItem(row.item)] : [],
+    );
+    return toOrderResponse(firstRow.order, items);
+  }
 
   async createOrder(
     dto: CreateOrderDto,

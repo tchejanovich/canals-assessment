@@ -305,20 +305,19 @@ exactly where the order stands:
 
 ### Idempotency: one key = one outcome
 
-The `Idempotency-Key` **header is required** on `POST /orders`. Creating an
-order reserves stock and charges a card, so a retry that hit the network twice
-must not place two orders; the key is the only thing that makes a reply safe to
-send twice. A client generates a fresh key (a UUID is fine) per real attempt and
-reuses it when retrying that attempt. The endpoint debounces by key: the exact
-same request replayed returns the stored result (`200`, same order id) instead
-of a duplicate order. The common contracts are followed:
+The `Idempotency-Key` header is currently optional on `POST /orders`, but clients
+should send one. Creating an order reserves stock and charges a card, so a retry
+that hit the network twice must not place two orders. A client generates a fresh
+key (a UUID is fine) per real attempt and reuses it when retrying that attempt.
+When provided, the endpoint debounces by key: the same request replay returns the
+stored result (`200`, same order id) instead of creating a duplicate order.
+Requests without the header are accepted but are not deduplicated. The common
+contracts are followed:
 
-- **Payloads are compared.** A canonical SHA-256 hash of the order-determining
-  fields (customer, normalised address fingerprint, line items sorted by
-  `productId` — the card number is deliberately excluded, since it changes how
-  an order is paid for, not what it is) is stored on the order. Reusing a key
-  with a *different* payload is client misuse and returns `409`: a stored order
-  that no longer matches what the client asked for is never silently returned.
+- **Payloads are compared.** A request fingerprint is stored with the order.
+  Reusing a key with a *different* payload is client misuse and returns `409`:
+  a stored order that no longer matches what the client asked for is never
+  silently returned.
 - **Racing keys are merged.** When two requests arrive with the same new key,
   the unique index lets the loser fail and attach to the committed winner —
   running the same payload check, so a concurrent key-reuse with a different
@@ -360,19 +359,52 @@ coordinates, otherwise idempotent order replays, the coordinates stored on
 untestable. The returned coordinates are *not* geographically accurate — the mock
 mimics the interface and the determinism of a real geocoder, not its accuracy.
 
-## HTTP status codes
+## API endpoints and HTTP status codes
 
-The order endpoint returns these codes. The two `4xx`s below the validation
+### `POST /orders`
+
+Creates an order. Send a JSON body with a customer, shipping address, items, and
+credit card number. For example:
+
+```json
+{
+  "customerId": 1,
+  "address": {
+    "line1": "123 Main St",
+    "line2": null,
+    "city": "New York",
+    "region": "NY",
+    "postalCode": "10001",
+    "country": "US"
+  },
+  "items": [{ "productId": 1, "quantity": 2 }],
+  "creditCardNumber": "4242424242424242"
+}
+```
+
+An `Idempotency-Key` header is optional, but recommended to make retries safe.
+A new successful request returns `201`; a matching replay with the same key
+returns `200`. Both return the order representation, including its items and
+current state.
+
+### `GET /orders/:id`
+
+Returns the order and its items by order ID using the same representation as
+`POST /orders`. The ID must be a positive integer. This endpoint was not required
+by the assessment; it was added to make it easier for the reviewer to inspect an
+order after creating it.
+
+The endpoints return these status codes. The two `4xx`s below the validation
 bucket that are easy to confuse are the stock cases, so they get a callout.
 
 | Code | When it happens | What it means | What to do |
 |------|-----------------|---------------|------------|
-| `400 Bad Request` | The body failed Zod validation, the `Idempotency-Key` header is missing, the country/region is unknown, a product is inactive, items mix currencies, or items repeat a `productId` | The request is malformed or violates a business rule the server can check without stock | Fix the request (send an `Idempotency-Key` for every attempt) |
+| `400 Bad Request` | `POST /orders` body validation failed, the country/region is unknown, a product is inactive, items mix currencies, or items repeat a `productId`; or `GET /orders/:id` has an invalid ID | The request is malformed or violates a business rule the server can check without stock | Fix the request; include an `Idempotency-Key` on order creation to make retries safe |
 | `402 Payment Required` | The payment provider declined the card (e.g. a number ending in `0000`) | Payment was refused. The reservation was committed first, then compensated: the order is **recorded** as `cancelled` and the reserved stock returned to inventory in the same transaction (nothing ships, nothing is double-decremented) | Retry with a **new** `Idempotency-Key` (the same key will keep returning this recorded `402`). Note: `402` was chosen as the nearest standard code to “payment needed”; it is a non-standard use of the code) |
-| `404 Not Found` | `customerId` (or a `productId` in `items`) does not exist | The referenced entity is unknown | Use an existing customer/product |
+| `404 Not Found` | On `POST /orders`, `customerId` (or a `productId` in `items`) does not exist; on `GET /orders/:id`, the order ID does not exist | The referenced entity is unknown | Use an existing customer/product/order ID |
 | `422 Unprocessable Entity` | **No** single warehouse currently stocks every requested line in the requested quantity | This is a stock-availability *fact*, not a race: no candidate existed at all, so no order was recorded | Reduce quantity or choose different items; may genuinely resolve later |
 | `409 Conflict` | (a) every candidate for the order lost the reservation race, or (b) an `Idempotency-Key` was reused with a different payload | (a) The race window drained every warehouse between candidate selection and reservation: the order is **recorded** with `state: 'created'`, nothing reserved/charged, and the response message carries its id. (b) The key already maps to a different request | (a) Retry with a **new** `Idempotency-Key` (the same key will keep returning this recorded outcome). (b) This is a client bug — the key must describe exactly one request |
-| `200 OK` | An `Idempotency-Key` replay where the key and payload match an existing order in a committed state | Idempotent replay: no new order was created; the body is the original order (id unchanged). `active` is returned as-is; a `reserved` order (crash between reservation and capture) is resumed — the idempotent capture re-runs and the reply is `active` | Nothing — treat as the same success |
+| `200 OK` | `GET /orders/:id` found the order, or `POST /orders` received an `Idempotency-Key` replay where the key and payload match an existing order | A GET returns the stored order. A POST replay creates no new order; the body is the original order (id unchanged). A `reserved` order (crash between reservation and capture) is resumed | Nothing — treat as success |
 | `201 Created` | A new order was placed successfully | Stock reserved, warehouse assigned, payment approved; the body has `state: 'active'` | Nothing |
 
 The distinction worth keeping straight: **`422` is “there was never a

@@ -13,6 +13,12 @@ export class ProductNotFoundError extends DomainError {
   }
 }
 
+export class OrderNotFoundError extends DomainError {
+  constructor(readonly orderId: number) {
+    super(`Order ${orderId} not found`);
+  }
+}
+
 export class ProductUnavailableError extends DomainError {
   constructor(readonly productId: number) {
     super(`Product ${productId} is not available`);
