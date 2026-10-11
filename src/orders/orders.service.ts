@@ -12,8 +12,13 @@ import { createHash } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { AddressesService } from '../addresses/addresses.service.js';
 import { buildAddressFingerprint } from '../addresses/address-fingerprint.js';
+import type { Coordinates } from '../common/geo.js';
 import { CustomersService } from '../customers/customers.service.js';
-import { DATABASE, type Database } from '../db/database.module.js';
+import {
+  DATABASE,
+  type Database,
+  type DatabaseTransaction,
+} from '../db/database.module.js';
 import {
   countries,
   orderItems,
@@ -27,8 +32,12 @@ import { GeocodingService } from '../geocoding/geocoding.service.js';
 import { InventoryService } from '../inventory/inventory.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
 import { ProductsService } from '../products/products.service.js';
-import { WarehousesService } from '../warehouses/warehouses.service.js';
+import {
+  WarehousesService,
+  type WarehouseWithDistance,
+} from '../warehouses/warehouses.service.js';
 import type {
+  CreateOrderAddress,
   CreateOrderDto,
   CreateOrderItem,
 } from './dto/create-order.dto.js';
@@ -128,65 +137,26 @@ export class OrdersService {
           coordinates,
         });
 
-        const [order] = await tx
-          .insert(orders)
-          .values({
-            customerId: dto.customerId,
-            warehouseId: null,
-            shippingAddressId: address.id,
-            subtotalAmount,
-            totalAmount,
-            currency,
-            shippingLine1: dto.address.line1,
-            shippingLine2: dto.address.line2 ?? null,
-            shippingCity: dto.address.city,
-            shippingRegion: dto.address.region,
-            shippingPostalCode: dto.address.postalCode,
-            shippingCountry: dto.address.country,
-            shippingLatitude: coordinates.latitude.toFixed(6),
-            shippingLongitude: coordinates.longitude.toFixed(6),
-            idempotencyKey: idempotencyKey,
-            idempotencyRequestHash: requestHash,
-            state: OrderState.Created,
-          })
-          .returning();
+        const order = await this.insertOrderWithItems(tx, {
+          customerId: dto.customerId,
+          shippingAddressId: address.id,
+          address: dto.address,
+          coordinates,
+          subtotalAmount,
+          totalAmount,
+          currency,
+          idempotencyKey,
+          idempotencyRequestHash: requestHash,
+          pricedLineItems,
+        });
 
-        await tx.insert(orderItems).values(
-          pricedLineItems.map((line) => ({
-            orderId: order.id,
-            productId: line.product.id,
-            productName: line.product.name,
-            sku: line.product.sku,
-            unitPriceAmount: line.unitPriceAmount,
-            quantity: line.quantity,
-            lineTotalAmount: line.lineTotalAmount,
-            currency,
-          })),
+        const reserved = await this.tryReserveOrder(
+          tx,
+          order,
+          candidates,
+          dto.items,
         );
-
-        for (const warehouse of candidates) {
-          try {
-            await this.inventory.reserve(tx, warehouse.id, dto.items);
-          } catch (error) {
-            // Stock ran out at this warehouse past candidate selection; fall
-            // back to the next-nearest warehouse that could fulfil the order.
-            if (error instanceof ConflictException) {
-              continue;
-            }
-            throw error;
-          }
-
-          const [reserved] = await tx
-            .update(orders)
-            .set({ state: OrderState.Reserved, warehouseId: warehouse.id })
-            .where(eq(orders.id, order.id))
-            .returning();
-          if (!reserved) {
-            throw new ConflictException(
-              `Order ${order.id} disappeared before it could be reserved`,
-            );
-          }
-
+        if (reserved) {
           return { order: reserved, state: OrderState.Reserved };
         }
 
@@ -228,6 +198,108 @@ export class OrdersService {
       ),
       created: true,
     };
+  }
+
+  /**
+   * Persists the order header (in state `created`, before any stock is
+   * reserved) together with its line items, both inside the caller's
+   * transaction so they commit atomically. Returns the inserted header.
+   */
+  private async insertOrderWithItems(
+    tx: DatabaseTransaction,
+    input: {
+      customerId: number;
+      shippingAddressId: number | null;
+      address: CreateOrderAddress;
+      coordinates: Coordinates;
+      subtotalAmount: bigint;
+      totalAmount: bigint;
+      currency: string;
+      idempotencyKey: string;
+      idempotencyRequestHash: string;
+      pricedLineItems: PricedLineItem[];
+    },
+  ): Promise<Order> {
+    const [order] = await tx
+      .insert(orders)
+      .values({
+        customerId: input.customerId,
+        warehouseId: null,
+        shippingAddressId: input.shippingAddressId,
+        subtotalAmount: input.subtotalAmount,
+        totalAmount: input.totalAmount,
+        currency: input.currency,
+        shippingLine1: input.address.line1,
+        shippingLine2: input.address.line2 ?? null,
+        shippingCity: input.address.city,
+        shippingRegion: input.address.region,
+        shippingPostalCode: input.address.postalCode,
+        shippingCountry: input.address.country,
+        shippingLatitude: input.coordinates.latitude.toFixed(6),
+        shippingLongitude: input.coordinates.longitude.toFixed(6),
+        idempotencyKey: input.idempotencyKey,
+        idempotencyRequestHash: input.idempotencyRequestHash,
+        state: OrderState.Created,
+      })
+      .returning();
+
+    await tx.insert(orderItems).values(
+      input.pricedLineItems.map((line) => ({
+        orderId: order.id,
+        productId: line.product.id,
+        productName: line.product.name,
+        sku: line.product.sku,
+        unitPriceAmount: line.unitPriceAmount,
+        quantity: line.quantity,
+        lineTotalAmount: line.lineTotalAmount,
+        currency: input.currency,
+      })),
+    );
+
+    return order;
+  }
+
+  /**
+   * Walks the nearest-first warehouse candidates and atomically reserves stock
+   * at the first one that still has it, flipping the order to `reserved` and
+   * assigning that warehouse in the same transaction. A candidate that lost the
+   * race for stock throws a `ConflictException` from `inventory.reserve`, which
+   * is treated as "try the next-nearest". Returns `null` when every candidate
+   * was exhausted, leaving the order in `created` for the caller to report.
+   */
+  private async tryReserveOrder(
+    tx: DatabaseTransaction,
+    order: Order,
+    candidates: WarehouseWithDistance[],
+    items: CreateOrderItem[],
+  ): Promise<Order | null> {
+    for (const warehouse of candidates) {
+      try {
+        await this.inventory.reserve(tx, warehouse.id, items);
+      } catch (error) {
+        // Stock ran out at this warehouse past candidate selection; fall
+        // back to the next-nearest warehouse that could fulfil the order.
+        if (error instanceof ConflictException) {
+          continue;
+        }
+        throw error;
+      }
+
+      const [reserved] = await tx
+        .update(orders)
+        .set({ state: OrderState.Reserved, warehouseId: warehouse.id })
+        .where(eq(orders.id, order.id))
+        .returning();
+      if (!reserved) {
+        throw new ConflictException(
+          `Order ${order.id} disappeared before it could be reserved`,
+        );
+      }
+
+      return reserved;
+    }
+
+    return null;
   }
 
   private async resolveProductMap(
