@@ -1,5 +1,5 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { and, eq, ne } from 'drizzle-orm';
 import { AddressesService } from '../addresses/addresses.service.js';
 import type { Coordinates } from '../common/geo.js';
 import { CustomersService } from '../customers/customers.service.js';
@@ -12,12 +12,15 @@ import {
   orderItems,
   type Order,
   orders,
+  type Payment,
   payments,
   type Product,
 } from '../db/schema/index.js';
 import { GeocodingService } from '../geocoding/geocoding.service.js';
 import { InsufficientStockError } from '../inventory/inventory.errors.js';
 import { InventoryService } from '../inventory/inventory.service.js';
+import { cardLast4 } from '../payments/card.js';
+import { PaymentStatus } from '../payments/payment-status.js';
 import { PaymentsService } from '../payments/payments.service.js';
 import { ProductsService } from '../products/products.service.js';
 import {
@@ -38,9 +41,11 @@ import {
   NoFulfillingWarehouseError,
   OrderPaymentDeclinedError,
   OrderVanishedError,
+  PaymentCaptureFailedError,
   PaymentDeclinedError,
   ProductNotFoundError,
   ProductUnavailableError,
+  ReservedOrderMissingWarehouseError,
   UnfulfilledOrderError,
 } from './orders.errors.js';
 import {
@@ -70,8 +75,31 @@ import type { PricedLineItem } from './orders.types.js';
  */
 const WAREHOUSE_FALLBACK_ATTEMPTS = 5;
 
+/**
+ * Deterministic provider idempotency keys. Deriving them from the order id (and
+ * the operation) means a replay of an order reuses the exact same keys, so the
+ * provider can collapse a retried authorize/capture/void into the response of
+ * the original call instead of moving money twice.
+ */
+const authorizationKey = (orderId: number): string =>
+  `order:${orderId}:authorize`;
+const captureKey = (orderId: number): string => `order:${orderId}:capture`;
+const voidKey = (orderId: number): string => `order:${orderId}:void`;
+
+/**
+ * Outcome of claiming the provider authorization for a payment row. `declined`
+ * is the only case that should cancel; `captured` means a concurrent finalizer
+ * already moved the funds and this caller must only activate.
+ */
+type AuthorizationClaim =
+  | { status: 'authorized'; authorizationId: string }
+  | { status: 'captured'; captureId: string; capturedAt: Date | null }
+  | { status: 'declined' };
+
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     private readonly customers: CustomersService,
@@ -120,6 +148,9 @@ export class OrdersService {
       WAREHOUSE_FALLBACK_ATTEMPTS,
     );
     if (candidates.length === 0) {
+      this.logger.warn(
+        `No single warehouse can fulfil customer ${dto.customerId}'s ${dto.items.length} item(s)`,
+      );
       throw new NoFulfillingWarehouseError();
     }
 
@@ -178,6 +209,9 @@ export class OrdersService {
           dto,
         );
         if (replayed) {
+          this.logger.log(
+            `Idempotency key ${idempotencyKey} raced; attached to existing order ${replayed.id}`,
+          );
           return { order: replayed, created: false };
         }
       }
@@ -280,10 +314,17 @@ export class OrdersService {
             throw new OrderVanishedError(order.id);
           }
 
+          this.logger.log(
+            `Order ${order.id} stock reserved at warehouse ${warehouse.id}`,
+          );
+
           return reserved;
         });
       } catch (error) {
         if (error instanceof InsufficientStockError) {
+          this.logger.debug(
+            `Order ${order.id}: warehouse ${warehouse.id} drained by a concurrent order, trying next candidate`,
+          );
           continue;
         }
         throw error;
@@ -345,14 +386,15 @@ export class OrdersService {
    *
    * - no stored order             -> `null`
    * - stored order is `active`    -> the stored order (no duplicate created)
-   * - stored order is `reserved`  -> the original request committed the stock
-   *                                  reservation but never finished the (slow)
-   *                                  payment capture, or crashed doing so. The
-   *                                  replay RESUMES it: the capture is
-   *                                  idempotent per order, so re-running it is
-   *                                  safe, and the order is then finalized.
-   * - stored order is `cancelled` -> the original capture was declined and the
-   *                                  key stays bound to that failed outcome.
+   * - stored order is `reserved`  -> the original request reserved the stock
+   *                                  but never finished the payment, or
+   *                                  crashed doing so. The replay RESUMES it
+   *                                  from the recorded payment status; the
+   *                                  provider calls are keyed by the order, so
+   *                                  re-running them cannot charge twice.
+   * - stored order is `cancelled` -> the payment was declined or its capture
+   *                                  failed and the key stays bound to that
+   *                                  failed outcome.
    * - stored order is `created`   -> a recorded race loss; throws the recorded
    *                                  conflict, key stays bound.
    *
@@ -375,6 +417,10 @@ export class OrdersService {
       idempotencyKey,
     );
 
+    this.logger.log(
+      `Idempotency key ${idempotencyKey} replay -> order ${existing.order.id} (state ${existing.order.state})`,
+    );
+
     switch (existing.order.state) {
       case OrderState.Active:
         return toOrderResponse(existing.order, existing.items);
@@ -390,63 +436,275 @@ export class OrdersService {
   }
 
   /**
-   * Captures the payment for an order whose stock is already reserved, then
-   * finalizes it. RUNS OUTSIDE ANY TRANSACTION on purpose: the reservation
-   * committed before the (potentially slow) payment call so inventory row
-   * locks are never held across it. On approval the order is flipped to
-   * `active` in a tiny guarded transaction; on decline/failure the order is
-   * cancelled and the reserved stock returned, atomically and idempotently.
+   * Takes a reserved order through the payment lifecycle: authorize a hold,
+   * capture it, then flip the order to `active`. RUNS OUTSIDE ANY TRANSACTION
+   * on purpose so inventory row locks are never held across the (potentially
+   * slow) provider calls.
+   *
+   * The flow is resumable. A payment row is claimed up front (status
+   * `authorizing`) and each provider call is keyed by the order id, so a replay
+   * after a crash resumes from wherever the recorded status says the last
+   * attempt stopped:
+   *
+   * - `authorizing`  -> (re)authorize; the key returns the original hold.
+   * - `authorized`   -> capture.
+   * - `captured`     -> capture already moved the funds; just activate.
+   * - `voided`       -> the attempt failed; cancel and report the decline.
+   *
+   * On decline or capture failure the authorization is released, the order is
+   * cancelled and the reserved stock is returned, atomically and idempotently.
    */
   private async finalizeReservedOrder(
     reservedOrder: Order,
     dto: CreateOrderDto,
   ): Promise<Order> {
-    const payment = await this.payments.charge({
-      creditCardNumber: dto.creditCardNumber,
-      amount: reservedOrder.totalAmount,
-      description: `Order ${reservedOrder.id} for customer ${reservedOrder.customerId}`,
-    });
-    if (!payment.approved) {
-      await this.cancelOrderAndRestoreStock(
-        reservedOrder.id,
-        reservedOrder.warehouseId!,
-        dto.items,
+    const orderId = reservedOrder.id;
+    const warehouseId = reservedOrder.warehouseId;
+    if (warehouseId === null) {
+      throw new ReservedOrderMissingWarehouseError(orderId);
+    }
+
+    const payment = await this.claimPayment(
+      reservedOrder,
+      dto.creditCardNumber,
+    );
+
+    switch (payment.status) {
+      case PaymentStatus.Captured:
+        // A previous attempt captured the funds but died before activating the
+        // order; finish the activation without touching the provider again.
+        this.logger.log(
+          `Order ${orderId} payment already captured (capture ${payment.captureId}); activating`,
+        );
+        return this.finishActivation(orderId, reservedOrder, {
+          captureId: payment.captureId!,
+          capturedAt: payment.capturedAt ?? new Date(),
+        });
+
+      case PaymentStatus.Voided:
+        // A previous attempt already released the hold; make sure the order is
+        // cancelled and the stock returned, then report the failure.
+        this.logger.warn(
+          `Order ${orderId} payment is voided; cancelling and restoring stock`,
+        );
+        await this.cancelOrderAndRestoreStock(orderId, warehouseId, dto.items);
+        throw new OrderPaymentDeclinedError(orderId);
+
+      default:
+        break;
+    }
+
+    const claim = await this.ensureAuthorized(payment, dto);
+    if (claim.status === 'captured') {
+      this.logger.log(
+        `Order ${orderId} payment captured by a concurrent finalizer (capture ${claim.captureId}); activating`,
       );
+      return this.finishActivation(orderId, reservedOrder, {
+        captureId: claim.captureId,
+        capturedAt: claim.capturedAt ?? new Date(),
+      });
+    }
+    if (claim.status === 'declined') {
+      this.logger.warn(
+        `Order ${orderId} payment declined; cancelling and restoring stock`,
+      );
+      await this.cancelOrderAndRestoreStock(orderId, warehouseId, dto.items);
       throw new PaymentDeclinedError();
     }
 
-    const activated = await this.activateOrder(reservedOrder.id, {
-      externalId: payment.externalId,
-      last4: payment.last4,
+    const capture = await this.payments.capture({
+      idempotencyKey: captureKey(orderId),
+      authorizationId: claim.authorizationId,
       amount: reservedOrder.totalAmount,
     });
+    if (capture.status !== 'captured') {
+      this.logger.error(
+        `Order ${orderId} payment capture failed; voiding authorization ${claim.authorizationId} and cancelling`,
+      );
+      await this.payments.void({
+        idempotencyKey: voidKey(orderId),
+        authorizationId: claim.authorizationId,
+      });
+      await this.cancelOrderAndRestoreStock(orderId, warehouseId, dto.items);
+      throw new PaymentCaptureFailedError(orderId);
+    }
+
+    this.logger.log(
+      `Order ${orderId} payment captured (authorization ${claim.authorizationId}, capture ${capture.captureId})`,
+    );
+
+    return this.finishActivation(orderId, reservedOrder, {
+      captureId: capture.captureId,
+      capturedAt: new Date(),
+    });
+  }
+
+  /**
+   * Claims the single payment row for an order, inserting it in `authorizing`
+   * status on first attempt. `ON CONFLICT (order_id) DO NOTHING` makes a
+   * concurrent replay a no-op, so both callers then observe (and resume) the
+   * same row rather than racing to create two.
+   */
+  private async claimPayment(
+    order: Order,
+    creditCardNumber: string,
+  ): Promise<Payment> {
+    await this.db
+      .insert(payments)
+      .values({
+        orderId: order.id,
+        idempotencyKey: authorizationKey(order.id),
+        status: PaymentStatus.Authorizing,
+        last4: cardLast4(creditCardNumber),
+        amount: order.totalAmount,
+      })
+      .onConflictDoNothing({ target: payments.orderId });
+
+    const [payment] = await this.db
+      .select()
+      .from(payments)
+      .where(eq(payments.orderId, order.id))
+      .limit(1);
+    if (!payment) {
+      throw new OrderVanishedError(order.id);
+    }
+
+    return payment;
+  }
+
+  /**
+   * Ensures the payment has an authorization. A payment already in `authorized`
+   * state reuses the recorded id (no provider call); otherwise `authorize` is
+   * invoked with the order-scoped key. The status write is conditional on
+   * `authorizing`, so a concurrent finalizer that already moved the row to
+   * `captured` or `voided` is not overwritten. A lost update re-reads the row
+   * and returns that outcome instead. If the process crashed after the provider
+   * created the hold but before it was recorded, the retried call returns the
+   * same authorization via that key.
+   */
+  private async ensureAuthorized(
+    payment: Payment,
+    dto: CreateOrderDto,
+  ): Promise<AuthorizationClaim> {
+    if (
+      payment.status === PaymentStatus.Authorized &&
+      payment.authorizationId
+    ) {
+      return {
+        status: 'authorized',
+        authorizationId: payment.authorizationId,
+      };
+    }
+
+    const authorization = await this.payments.authorize({
+      idempotencyKey: payment.idempotencyKey,
+      creditCardNumber: dto.creditCardNumber,
+      amount: payment.amount,
+      description: `Order ${payment.orderId} for customer ${dto.customerId}`,
+    });
+    if (authorization.status === 'declined') {
+      return { status: 'declined' };
+    }
+
+    const [updated] = await this.db
+      .update(payments)
+      .set({
+        status: PaymentStatus.Authorized,
+        authorizationId: authorization.authorizationId,
+        last4: authorization.last4,
+      })
+      .where(
+        and(
+          eq(payments.id, payment.id),
+          eq(payments.status, PaymentStatus.Authorizing),
+        ),
+      )
+      .returning();
+
+    if (updated?.authorizationId) {
+      return { status: 'authorized', authorizationId: updated.authorizationId };
+    }
+
+    return this.claimFromStoredPayment(
+      payment.id,
+      authorization.authorizationId,
+    );
+  }
+
+  /**
+   * Reads the payment after a lost `authorizing` -> `authorized` update and
+   * reports the status the winning finalizer left behind.
+   */
+  private async claimFromStoredPayment(
+    paymentId: number,
+    authorizationId: string,
+  ): Promise<AuthorizationClaim> {
+    const [current] = await this.db
+      .select()
+      .from(payments)
+      .where(eq(payments.id, paymentId))
+      .limit(1);
+
+    if (current?.status === PaymentStatus.Captured && current.captureId) {
+      return {
+        status: 'captured',
+        captureId: current.captureId,
+        capturedAt: current.capturedAt,
+      };
+    }
+
+    if (
+      current?.status === PaymentStatus.Authorized &&
+      current.authorizationId
+    ) {
+      return {
+        status: 'authorized',
+        authorizationId: current.authorizationId,
+      };
+    }
+
+    if (current?.status === PaymentStatus.Voided) {
+      return { status: 'declined' };
+    }
+
+    // Still `authorizing`: the other update has not committed. Capture with
+    // the provider id from this call; the guarded write above will not run
+    // again, so a later `captured` status cannot be clobbered.
+    return { status: 'authorized', authorizationId };
+  }
+
+  /**
+   * Flips a `reserved` order to `active` and records the captured payment in
+   * one transaction, guarded on the current state so a concurrent finalizer
+   * cannot double-activate. Falls back to the committed row (or, failing that,
+   * the in-memory order) when another flow already activated it.
+   */
+  private async finishActivation(
+    orderId: number,
+    reservedOrder: Order,
+    capture: { captureId: string; capturedAt: Date },
+  ): Promise<Order> {
+    const activated = await this.activateOrder(orderId, capture);
     if (activated) {
       return activated;
     }
 
-    // Another flow already finalized this order (e.g. a concurrent replay);
-    // read the committed state so we report it accurately.
-    const [current] = await this.db
-      .select()
-      .from(orders)
-      .where(eq(orders.id, reservedOrder.id))
-      .limit(1);
-    return current ?? reservedOrder;
+    return (await this.reloadOrder(orderId)) ?? reservedOrder;
   }
 
   /**
    * Flips a `reserved` order to `active` in its own tiny transaction and, in
-   * the same atomic step, records the successful payment. Guarded on the
-   * current state so a concurrent finalizer cannot double-activate or store a
-   * duplicate payment: if the order already moved on, no row matches and
-   * `null` is returned.
+   * the same atomic step, marks the payment `captured`. Guarded on the current
+   * state so a concurrent finalizer cannot double-activate or store a duplicate
+   * capture: if the order already moved on, no row matches and `null` is
+   * returned.
    */
   private async activateOrder(
     orderId: number,
-    payment: { externalId: string; last4: string; amount: bigint },
+    capture: { captureId: string; capturedAt: Date },
   ): Promise<Order | null> {
-    const activated = await this.db.transaction(async (tx) => {
-      const [row] = await tx
+    return this.db.transaction(async (tx) => {
+      const [activated] = await tx
         .update(orders)
         .set({ state: OrderState.Active })
         .where(
@@ -454,27 +712,42 @@ export class OrdersService {
         )
         .returning();
 
-      if (row) {
-        await tx.insert(payments).values({
-          orderId,
-          externalId: payment.externalId,
-          last4: payment.last4,
-          amount: payment.amount,
-        });
+      if (!activated) {
+        return null;
       }
 
-      return row ?? null;
-    });
+      await tx
+        .update(payments)
+        .set({
+          status: PaymentStatus.Captured,
+          captureId: capture.captureId,
+          capturedAt: capture.capturedAt,
+        })
+        .where(eq(payments.orderId, orderId));
 
-    return activated;
+      this.logger.log(
+        `Order ${orderId} activated at warehouse ${activated.warehouseId}`,
+      );
+
+      return activated;
+    });
+  }
+
+  private async reloadOrder(orderId: number): Promise<Order | null> {
+    const [order] = await this.db
+      .select()
+      .from(orders)
+      .where(eq(orders.id, orderId))
+      .limit(1);
+    return order ?? null;
   }
 
   /**
-   * Compensation for a failed payment capture: flips the order from `reserved`
-   * to `cancelled` and returns the reserved stock to inventory, in one
-   * transaction. The guard on `state = 'reserved'` makes it idempotent — if a
-   * second caller runs it after the flip, it matches zero rows and restores
-   * nothing (no double restock).
+   * Compensation for a failed payment: flips the order from `reserved` to
+   * `cancelled`, returns the reserved stock, and marks the (uncaptured) payment
+   * `voided`, all in one transaction. The guards make it idempotent — a second
+   * caller matches no rows and restores nothing (no double restock), and a
+   * payment that was somehow captured is never overwritten.
    */
   private async cancelOrderAndRestoreStock(
     orderId: number,
@@ -492,7 +765,20 @@ export class OrdersService {
 
       if (cancelled) {
         await this.inventory.restore(tx, warehouseId, items);
+        this.logger.warn(
+          `Order ${orderId} cancelled at warehouse ${warehouseId}; reserved stock returned`,
+        );
       }
+
+      await tx
+        .update(payments)
+        .set({ status: PaymentStatus.Voided, voidedAt: new Date() })
+        .where(
+          and(
+            eq(payments.orderId, orderId),
+            ne(payments.status, PaymentStatus.Captured),
+          ),
+        );
     });
   }
 }

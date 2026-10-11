@@ -1,0 +1,1 @@
+ALTER TABLE "orders" ALTER COLUMN "state" SET DEFAULT 'created';

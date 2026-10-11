@@ -47,6 +47,23 @@ export class OrderVanishedError extends DomainError {
   }
 }
 
+/**
+ * Internal invariant violation, not a business rule: a `reserved` order always
+ * carries the warehouse that won its stock race, so a missing warehouse means
+ * the row is inconsistent (a bug or corruption). Deliberately NOT a
+ * `DomainError`, so it is never mapped to a `4xx`: it propagates as a `500` and
+ * is logged with a stack trace instead of being reported to the client as a
+ * retryable conflict.
+ */
+export class ReservedOrderMissingWarehouseError extends Error {
+  constructor(readonly orderId: number) {
+    super(
+      `Order ${orderId} is '${OrderState.Reserved}' but has no warehouse assigned`,
+    );
+    this.name = new.target.name;
+  }
+}
+
 export class IdempotencyKeyReusedError extends DomainError {
   constructor(readonly key: string) {
     super(`Idempotency key ${key} was already used with a different payload`);
@@ -65,5 +82,15 @@ export class OrderPaymentDeclinedError extends DomainError {
 export class PaymentDeclinedError extends DomainError {
   constructor() {
     super('Payment was declined');
+  }
+}
+
+export class PaymentCaptureFailedError extends DomainError {
+  constructor(readonly orderId: number) {
+    super(
+      `Order ${orderId} authorized but its payment capture failed; the authorization was released, ` +
+        `the order is recorded as '${OrderState.Cancelled}' and any reserved stock was returned. ` +
+        `Retry with a new idempotency key to attempt it again`,
+    );
   }
 }

@@ -15,9 +15,10 @@
  *   exhausted by the race window). A `created` order is the recorded trace of
  *   a lost race; it is reported in the 409 and its key stays bound.
  * - `reserved` — stock has been decremented at a specific warehouse and the
- *   warehouse is assigned; awaiting the payment capture, which runs outside
- *   any transaction. A crash in this state is recoverable: a replay of the key
- *   re-runs the capture (idempotent) and finalizes.
+ *   warehouse is assigned; awaiting the payment lifecycle (authorize/capture),
+ *   which runs outside any transaction. A crash in this state is recoverable: a
+ *   replay of the key resumes the payment from its recorded status, and the
+ *   order-scoped provider idempotency keys prevent a double charge.
  * - `active`   — payment captured; the order is fulfillable.
  * - `cancelled`— payment capture declined/failed; the reserved stock was
  *   returned to inventory atomically with this transition. Nothing was charged.

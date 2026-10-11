@@ -1,11 +1,5 @@
-import {
-  BadRequestException,
-  ConflictException,
-  HttpException,
-  HttpStatus,
-  NotFoundException,
-  UnprocessableEntityException,
-} from '@nestjs/common';
+import { HttpException, HttpStatus } from '@nestjs/common';
+import { STATUS_CODES } from 'node:http';
 import { DomainError } from '../common/domain-error.js';
 import { ValidationError } from '../common/validation-error.js';
 import {
@@ -21,6 +15,7 @@ import {
   NoFulfillingWarehouseError,
   OrderPaymentDeclinedError,
   OrderVanishedError,
+  PaymentCaptureFailedError,
   PaymentDeclinedError,
   ProductNotFoundError,
   ProductUnavailableError,
@@ -47,13 +42,16 @@ const STATUS_BY_ERROR = new Map<Function, HttpStatus>([
   [InsufficientStockError, HttpStatus.CONFLICT],
   [OrderPaymentDeclinedError, HttpStatus.PAYMENT_REQUIRED],
   [PaymentDeclinedError, HttpStatus.PAYMENT_REQUIRED],
+  [PaymentCaptureFailedError, HttpStatus.PAYMENT_REQUIRED],
   [NoFulfillingWarehouseError, HttpStatus.UNPROCESSABLE_ENTITY],
 ]);
 
 /**
- * Translates a domain error into the equivalent Nest HTTP exception, preserving
- * the framework's standard response body for each status. Non-domain errors
- * (bugs, database failures) are re-thrown untouched so they surface as 500s.
+ * Translates a domain error into an HTTP exception with a single response
+ * envelope shared by every business error, so clients parse one shape:
+ * `{ statusCode, error, message, errors? }`. Field-level `errors` are only
+ * present for a failed schema validation. Non-domain errors (bugs, database
+ * failures) are re-thrown untouched so they surface as 500s.
  */
 export function toHttpException(error: unknown): HttpException {
   if (!(error instanceof DomainError)) {
@@ -63,23 +61,13 @@ export function toHttpException(error: unknown): HttpException {
   const status =
     STATUS_BY_ERROR.get(error.constructor) ?? HttpStatus.INTERNAL_SERVER_ERROR;
 
-  if (error instanceof ValidationError) {
-    return new BadRequestException({
+  return new HttpException(
+    {
+      statusCode: status,
+      error: STATUS_CODES[status] ?? 'Error',
       message: error.message,
-      errors: error.issues,
-    });
-  }
-
-  switch (status) {
-    case HttpStatus.BAD_REQUEST:
-      return new BadRequestException(error.message);
-    case HttpStatus.NOT_FOUND:
-      return new NotFoundException(error.message);
-    case HttpStatus.CONFLICT:
-      return new ConflictException(error.message);
-    case HttpStatus.UNPROCESSABLE_ENTITY:
-      return new UnprocessableEntityException(error.message);
-    default:
-      return new HttpException(error.message, status);
-  }
+      ...(error instanceof ValidationError ? { errors: error.issues } : {}),
+    },
+    status,
+  );
 }
