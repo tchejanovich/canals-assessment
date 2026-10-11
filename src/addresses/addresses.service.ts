@@ -1,12 +1,28 @@
-import { ConflictException, Injectable } from '@nestjs/common';
-import { eq } from 'drizzle-orm';
-import type { DatabaseTransaction } from '../db/database.module.js';
-import { type Address, addresses } from '../db/schema/index.js';
+import {
+  BadRequestException,
+  ConflictException,
+  Inject,
+  Injectable,
+} from '@nestjs/common';
+import { and, eq } from 'drizzle-orm';
+import {
+  DATABASE,
+  type Database,
+  type DatabaseTransaction,
+} from '../db/database.module.js';
+import {
+  type Address,
+  addresses,
+  countries,
+  regions,
+} from '../db/schema/index.js';
 import { buildAddressFingerprint } from './address-fingerprint.js';
 import type { StoreAddressInput } from './addresses.types.js';
 
 @Injectable()
 export class AddressesService {
+  constructor(@Inject(DATABASE) private readonly db: Database) {}
+
   /**
    * Idempotently persists the address and returns it. The `addresses` table is
    * deduplicated by fingerprint, so this inserts on first sight and otherwise
@@ -58,5 +74,38 @@ export class AddressesService {
     }
 
     return address;
+  }
+
+  /**
+   * Resolves an ISO country code to its stored id, rejecting unknown codes.
+   */
+  async resolveCountry(countryCode: string): Promise<number> {
+    const [country] = await this.db
+      .select({ id: countries.id })
+      .from(countries)
+      .where(eq(countries.code, countryCode))
+      .limit(1);
+    if (!country) {
+      throw new BadRequestException(`Unknown country ${countryCode}`);
+    }
+    return country.id;
+  }
+
+  /**
+   * Resolves a region code scoped to a country to its stored id, rejecting
+   * unknown codes.
+   */
+  async resolveRegion(countryId: number, regionCode: string): Promise<number> {
+    const [region] = await this.db
+      .select({ id: regions.id })
+      .from(regions)
+      .where(
+        and(eq(regions.countryId, countryId), eq(regions.code, regionCode)),
+      )
+      .limit(1);
+    if (!region) {
+      throw new BadRequestException(`Unknown region ${regionCode}`);
+    }
+    return region.id;
   }
 }

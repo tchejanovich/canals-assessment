@@ -18,12 +18,10 @@ import {
   type DatabaseTransaction,
 } from '../db/database.module.js';
 import {
-  countries,
   orderItems,
   type Order,
   orders,
   type Product,
-  regions,
 } from '../db/schema/index.js';
 import { GeocodingService } from '../geocoding/geocoding.service.js';
 import { InventoryService } from '../inventory/inventory.service.js';
@@ -103,8 +101,11 @@ export class OrdersService {
 
     const currency = validateAndResolveCurrency(pricedLineItems);
 
-    const countryId = await this.resolveCountry(dto.address.country);
-    const regionId = await this.resolveRegion(countryId, dto.address.region);
+    const countryId = await this.addresses.resolveCountry(dto.address.country);
+    const regionId = await this.addresses.resolveRegion(
+      countryId,
+      dto.address.region,
+    );
 
     const coordinates = await this.geocoding.getCoordinates(dto.address);
 
@@ -479,34 +480,5 @@ export class OrdersService {
         `It is recorded with state '${OrderState.Created}', no stock was reserved and nothing was charged. ` +
         `Retry with a new idempotency key to attempt it again`,
     );
-  }
-
-  private async resolveCountry(countryCode: string): Promise<number> {
-    const [country] = await this.db
-      .select({ id: countries.id })
-      .from(countries)
-      .where(eq(countries.code, countryCode))
-      .limit(1);
-    if (!country) {
-      throw new BadRequestException(`Unknown country ${countryCode}`);
-    }
-    return country.id;
-  }
-
-  private async resolveRegion(
-    countryId: number,
-    regionCode: string,
-  ): Promise<number> {
-    const [region] = await this.db
-      .select({ id: regions.id })
-      .from(regions)
-      .where(
-        and(eq(regions.countryId, countryId), eq(regions.code, regionCode)),
-      )
-      .limit(1);
-    if (!region) {
-      throw new BadRequestException(`Unknown region ${regionCode}`);
-    }
-    return region.id;
   }
 }
