@@ -189,6 +189,49 @@ which plans as `Limit -> Nested Loop Anti Join -> Index Scan using ..._gist
 ... Order By`. So the split is not strictly required; it is simply the clearer of
 the two index-preserving shapes.
 
+**Concurrent stock reservation is optimistic, with nearest-first fallback**
+
+Stock availability is checked twice, at different strengths, and the difference
+is what makes the system safe under concurrency:
+
+- **Candidate selection is an unlocked read.** `findFulfillingWarehouses` returns
+  the warehouses that *currently* stock every requested item, with no locks held.
+  Ranking, geocoding and pricing all happen while nothing is locked.
+- **Reservation is the source of truth.** Decrementing stock is a single atomic
+  `UPDATE inventory SET quantity = quantity - :q WHERE warehouse_id = :w AND
+  product_id = :p AND quantity >= :q`. Under contention the second writer blocks
+  on the row lock, then re-evaluates the predicate against the committed value; if
+  stock is now short it updates zero rows, which `InventoryService.reserve` turns
+  into a `ConflictException`. This is what makes overselling impossible — a
+  `quantity >= 0` check constraint is the last-resort backstop.
+
+This is optimistic concurrency: because the read is unlocked, a concurrent order
+can drain a warehouse in the gap between candidate selection and reservation. The
+reservation re-check catches that case (zero rows updated). Rather than failing
+the customer, `OrdersService` walks the nearest-first candidate list and retries
+the reservation on the next-nearest warehouse that can still fulfil the order,
+up to `WAREHOUSE_FALLBACK_ATTEMPTS`, only surfacing a `409` once every candidate
+is exhausted.
+
+The fallback exists **only** for that window. With no concurrent writer to the
+candidate's inventory the first (nearest) candidate always succeeds, since the
+read that just included it cannot have lied; candidates 2..N are reached only
+under contention. The number of attempts is a cheap insurance policy against
+losing a sale to a race, not a correctness requirement.
+
+Two supporting decisions:
+
+- **Deterministic lock ordering.** A multi-item reservation updates each product
+  row in turn, so `reserve` sorts the requests by `productId` first. Without this,
+  two orders listing the same products in opposite order would acquire row locks
+  in opposite order and deadlock even when every individual row is
+  stock-sufficient.
+- **Optimistic over pessimistic.** Locking the candidate rows up front
+  (`SELECT ... FOR UPDATE`) would close the gap, but it would hold row locks across
+  geocoding and pricing and serialize competing orders for longer. The unlocked
+  read plus an atomic re-check and fallback keeps the lock window to the single
+  reserve statement.
+
 ### Mocks
 
 External integrations are mocked so the project runs without third-party
