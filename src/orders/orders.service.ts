@@ -10,10 +10,11 @@ import {
 } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
+import { AddressesService } from '../addresses/addresses.service.js';
+import { buildAddressFingerprint } from '../addresses/address-fingerprint.js';
 import { CustomersService } from '../customers/customers.service.js';
 import { DATABASE, type Database } from '../db/database.module.js';
 import {
-  addresses,
   countries,
   orderItems,
   type Order,
@@ -28,7 +29,6 @@ import { PaymentsService } from '../payments/payments.service.js';
 import { ProductsService } from '../products/products.service.js';
 import { WarehousesService } from '../warehouses/warehouses.service.js';
 import type {
-  CreateOrderAddress,
   CreateOrderDto,
   CreateOrderItem,
 } from './dto/create-order.dto.js';
@@ -38,23 +38,6 @@ import type {
 } from './dto/order-response.dto.js';
 import { OrderState } from './order-state.js';
 import type { PricedLineItem } from './orders.types.js';
-
-function normalizePart(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, ' ');
-}
-
-function buildFingerprint(address: CreateOrderAddress): string {
-  return [
-    address.line1,
-    address.line2 ?? '',
-    address.city,
-    address.region,
-    address.postalCode,
-    address.country,
-  ]
-    .map(normalizePart)
-    .join('|');
-}
 
 function isUniqueViolation(error: unknown, constraint: string): boolean {
   if (typeof error !== 'object' || error === null) {
@@ -86,6 +69,7 @@ export class OrdersService {
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     private readonly customers: CustomersService,
+    private readonly addresses: AddressesService,
     private readonly products: ProductsService,
     private readonly geocoding: GeocodingService,
     private readonly warehouses: WarehousesService,
@@ -133,56 +117,16 @@ export class OrdersService {
     const totalAmount = subtotalAmount;
     const requestHash = this.computeIdempotencyRequestHash(dto);
 
-    // Phase 1 — one short transaction: persist the address, the order in state
-    // `created` and its line items, then walk the nearest-first candidates and
-    // reserve stock. A successful reserve flips the same row to `reserved` and
-    // assigns the warehouse, atomically with the decrement. If every candidate
-    // lost the race window the order stays `created` — nothing reserved,
-    // nothing charged — and the caller reports the recorded 409.
-    //
-    // Phase 2 — outside any transaction: capture the payment. The reservation
-    // commits BEFORE the (potentially slow) payment call, so inventory row
-    // locks are never held across it. A declined capture is compensated in its
-    // own transaction: the order flips to `cancelled` and the reserved stock
-    // is returned to inventory, both atomically and idempotently (the flip is
-    // guarded on `state = 'reserved'`, so a second run restores nothing).
     let outcome: { order: Order; state: OrderState };
     try {
       outcome = await this.db.transaction(async (tx) => {
-        const fingerprint = buildFingerprint(dto.address);
-
-        const inserted = await tx
-          .insert(addresses)
-          .values({
-            customerId: dto.customerId,
-            line1: dto.address.line1,
-            line2: dto.address.line2 ?? null,
-            city: dto.address.city,
-            regionId,
-            postalCode: dto.address.postalCode,
-            countryId,
-            latitude: coordinates.latitude.toFixed(6),
-            longitude: coordinates.longitude.toFixed(6),
-            fingerprint,
-          })
-          .onConflictDoNothing({ target: addresses.fingerprint })
-          .returning();
-
-        const address =
-          inserted[0] ??
-          (
-            await tx
-              .select()
-              .from(addresses)
-              .where(eq(addresses.fingerprint, fingerprint))
-              .limit(1)
-          )[0];
-
-        if (!address) {
-          throw new ConflictException(
-            'Address could not be stored despite a stable fingerprint',
-          );
-        }
+        const address = await this.addresses.findOrCreate(tx, {
+          customerId: dto.customerId,
+          address: dto.address,
+          regionId,
+          countryId,
+          coordinates,
+        });
 
         const [order] = await tx
           .insert(orders)
@@ -346,9 +290,7 @@ export class OrdersService {
     return currency;
   }
 
-  private async findIdempotentOrder(
-    key: string,
-  ): Promise<{
+  private async findIdempotentOrder(key: string): Promise<{
     order: Order;
     items: OrderItemResponse[];
     requestHash: string | null;
@@ -454,7 +396,12 @@ export class OrdersService {
       tx
         .update(orders)
         .set({ state: OrderState.Active })
-        .where(and(eq(orders.id, reservedOrder.id), eq(orders.state, OrderState.Reserved)))
+        .where(
+          and(
+            eq(orders.id, reservedOrder.id),
+            eq(orders.state, OrderState.Reserved),
+          ),
+        )
         .returning(),
     );
     if (activated) {
@@ -506,7 +453,7 @@ export class OrdersService {
   private computeIdempotencyRequestHash(dto: CreateOrderDto): string {
     const canonicalPayload = {
       customerId: dto.customerId,
-      address: buildFingerprint(dto.address),
+      address: buildAddressFingerprint(dto.address),
       items: [...dto.items]
         .sort((a, b) => a.productId - b.productId)
         .map((item) => ({
