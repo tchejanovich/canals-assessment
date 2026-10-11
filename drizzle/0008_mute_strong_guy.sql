@@ -1,0 +1,1 @@
+ALTER TABLE "addresses" DROP COLUMN "geocoded_at";

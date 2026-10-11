@@ -1,0 +1,30 @@
+
+Assignment
+Canals backend assessment
+Congrats on entering into the Canals interview process! As a first step, please implement the below. Assuming all is good, we’ll then review it live and build on top of it.
+
+You're building a backend service for an e-commerce platform. Please implement a web server with a minimal order management API.
+
+POST /orders to create an order, which will be called by the UI as customers place orders.
+
+Orders have a customer, a shipping address, and a list of items (products and quantities).
+
+An order must be filled from a single warehouse, so you need to find a warehouse that has all the requested products. If multiple warehouses fit, you should pick the one closest to the shipping address.
+
+For converting an address to latitude/longitude, usually we’d use a 3rd party geocoding api. You can mock that.
+
+On creating the order, it should call an external payment API, which you can mock. The payments API takes as input a credit card number, amount, and description (we know in the real world we wouldn’t want to have people’s credit card numbers and the payment integration would be more complicated than a simple API request, but let’s imagine that it’s that simple).
+
+Meta-instructions
+
+You may use the language/framework of your choice.
+
+There’s no need to implement a full app/system. For example, no need to implement apis for managing customers/warehouses/products, no need to worry about auth. Only the functionality specified above.
+
+However, that functionality should be production-ready. Please use a real database and treat data storage and management with the same rigor you would in a high-traffic production system. The goal is to simulate real-world engineering work as closely as possible.
+
+The exception is automated tests. You can include them if they’re helpful to you, but from our perspective the amount of signal they give vs the amount of time they take to write isn’t worth requiring candidates to write them. In the real world we always write tests, but for this interview problem it’s not necessary.
+
+You may use AI or any tools you’d like. There are no limits.
+
+The requirements are intentionally brief. You should make reasonable design decisions. If you have any questions though, feel free to reach out.
