@@ -232,6 +232,59 @@ Two supporting decisions:
   read plus an atomic re-check and fallback keeps the lock window to the single
   reserve statement.
 
+### Order states: race losses are recorded, not rolled back
+
+An order starts life as `created` and becomes `active` the moment a warehouse
+reservation succeeds and the payment is approved. The header, its line items
+and the deduplicated address are written *before* any stock is reserved (after
+validation), and one transaction commits exactly one of two outcomes:
+
+- **A reservation succeeds** on some nearest-first candidate — the order is
+  flipped to `active`, assigned that warehouse, and charged.
+- **Every candidate is exhausted** by the race window — the transaction commits
+  the order in state `created` and the API answers `409` carrying that order's
+  id. No stock was reserved and nothing was charged (reservation failures update
+  zero rows; the charge happens only on activation, inside the same
+  transaction).
+
+Why keep the losers? A `409` caused purely by contention is otherwise a black
+box: there is no way to measure how often the nearest-first fallback actually
+loses a sale, and support has nothing to inspect. A recorded `created` order
+gives an id plus full header/line data. Note that no order is *invented* by
+this — the "no candidate at all" case returns `422` *before* any order row
+exists, so `created` rows only ever represent genuine race losses.
+
+`created` orders are deliberately not shippable: no warehouse is assigned, and
+anything that lists or fulfils orders must filter on `state = 'active'` (the
+`state` + `created_at` index exists for that). A `created` order also keeps its
+idempotency key occupied, which is covered in the next section.
+
+### Idempotency: one key = one outcome
+
+The `Idempotency-Key` **header is required** on `POST /orders`. Creating an
+order reserves stock and charges a card, so a retry that hit the network twice
+must not place two orders; the key is the only thing that makes a reply safe to
+send twice. A client generates a fresh key (a UUID is fine) per real attempt and
+reuses it when retrying that attempt. The endpoint debounces by key: the exact
+same request replayed returns the stored result (`200`, same order id) instead
+of a duplicate order. The common contracts are followed:
+
+- **Payloads are compared.** A canonical SHA-256 hash of the order-determining
+  fields (customer, normalised address fingerprint, line items sorted by
+  `productId` — the card number is deliberately excluded, since it changes how
+  an order is paid for, not what it is) is stored on the order. Reusing a key
+  with a *different* payload is client misuse and returns `409`: a stored order
+  that no longer matches what the client asked for is never silently returned.
+- **Racing keys are merged.** When two requests arrive with the same new key,
+  the unique index lets the loser fail and attach to the committed winner —
+  running the same payload check, so a concurrent key-reuse with a different
+  payload also surfaces a `409`.
+- **A recorded failure owns its key.** A `created` order keeps its key, so
+  retrying the same key returns the recorded `409` rather than re-attempting.
+  One key, one outcome — to try the order again the client issues a new key.
+  This matches the idempotency-key contract used by payment providers such as
+  Stripe.
+
 ### Mocks
 
 External integrations are mocked so the project runs without third-party
@@ -257,6 +310,28 @@ coordinates, otherwise idempotent order replays, the coordinates stored on
 `addresses`, and distance-based warehouse selection would be non-reproducible and
 untestable. The returned coordinates are *not* geographically accurate — the mock
 mimics the interface and the determinism of a real geocoder, not its accuracy.
+
+## HTTP status codes
+
+The order endpoint returns these codes. The two `4xx`s below the validation
+bucket that are easy to confuse are the stock cases, so they get a callout.
+
+| Code | When it happens | What it means | What to do |
+|------|-----------------|---------------|------------|
+| `400 Bad Request` | The body failed Zod validation, the `Idempotency-Key` header is missing, the country/region is unknown, a product is inactive, items mix currencies, or items repeat a `productId` | The request is malformed or violates a business rule the server can check without stock | Fix the request (send an `Idempotency-Key` for every attempt) |
+| `402 Payment Required` | The payment provider declined the card (e.g. a number ending in `0000`) | Payment was refused; the entire transaction was rolled back — no order recorded, no stock reserved | Use a valid card (note: `402` was chosen as the nearest standard code to “payment needed”; it is a non-standard use of the code) |
+| `404 Not Found` | `customerId` (or a `productId` in `items`) does not exist | The referenced entity is unknown | Use an existing customer/product |
+| `422 Unprocessable Entity` | **No** single warehouse currently stocks every requested line in the requested quantity | This is a stock-availability *fact*, not a race: no candidate existed at all, so no order was recorded | Reduce quantity or choose different items; may genuinely resolve later |
+| `409 Conflict` | (a) every candidate for the order lost the reservation race, or (b) an `Idempotency-Key` was reused with a different payload | (a) The race window drained every warehouse between candidate selection and reservation: the order is **recorded** with `state: 'created'`, nothing reserved/charged, and the response message carries its id. (b) The key already maps to a different request | (a) Retry with a **new** `Idempotency-Key` (the same key will keep returning this recorded outcome). (b) This is a client bug — the key must describe exactly one request |
+| `200 OK` | An `Idempotency-Key` replay where the key and payload match an existing **active** order | Idempotent replay: no new order was created; the body is the original order (id unchanged, `state: 'active'`) | Nothing — treat as the same success |
+| `201 Created` | A new order was placed successfully | Stock reserved, warehouse assigned, payment approved; the body has `state: 'active'` | Nothing |
+
+The distinction worth keeping straight: **`422` is “there was never a
+candidate”, `409` is “there was, but a concurrent order beat us to it”**. Only
+the `409` records an order (as `created`), which is why its body — a message
+rather than an order object — points at a recorded id you can inspect.
+
+Anything else (server faults, unavailable dependencies) surfaces as a `500`.
 
 ## Project setup
 

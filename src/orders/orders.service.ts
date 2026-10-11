@@ -8,6 +8,7 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { CustomersService } from '../customers/customers.service.js';
 import { DATABASE, type Database } from '../db/database.module.js';
@@ -92,13 +93,11 @@ export class OrdersService {
 
   async createOrder(
     dto: CreateOrderDto,
-    idempotencyKey?: string,
+    idempotencyKey: string,
   ): Promise<{ order: OrderResponse; created: boolean }> {
-    if (idempotencyKey) {
-      const existing = await this.findByIdempotencyKey(idempotencyKey);
-      if (existing) {
-        return { order: existing, created: false };
-      }
+    const replayed = await this.resolveIdempotentReplay(idempotencyKey, dto);
+    if (replayed) {
+      return { order: replayed, created: false };
     }
 
     const customer = await this.customers.findById(dto.customerId);
@@ -130,82 +129,104 @@ export class OrdersService {
     }
 
     const totalAmount = subtotalAmount;
+    const requestHash = this.computeIdempotencyRequestHash(dto);
 
-    for (const warehouse of candidates) {
-      try {
-        const created = await this.db.transaction(async (tx) => {
-          await this.inventory.reserve(tx, warehouse.id, dto.items);
+    let outcome: { order: Order; state: 'created' | 'active' };
+    try {
+      outcome = await this.db.transaction(async (tx) => {
+        const fingerprint = buildFingerprint(dto.address);
 
-          const fingerprint = buildFingerprint(dto.address);
+        const inserted = await tx
+          .insert(addresses)
+          .values({
+            customerId: dto.customerId,
+            line1: dto.address.line1,
+            line2: dto.address.line2 ?? null,
+            city: dto.address.city,
+            regionId,
+            postalCode: dto.address.postalCode,
+            countryId,
+            latitude: coordinates.latitude.toFixed(6),
+            longitude: coordinates.longitude.toFixed(6),
+            fingerprint,
+          })
+          .onConflictDoNothing({ target: addresses.fingerprint })
+          .returning();
 
-          // Address rows are de-duplicated by their normalised fingerprint and
-          // are otherwise immutable, so on conflict there is nothing to update:
-          // DO NOTHING (no write) and a fallback SELECT pick up the existing
-          // row when another order won the insert race.
-          const inserted = await tx
-            .insert(addresses)
-            .values({
-              customerId: dto.customerId,
-              line1: dto.address.line1,
-              line2: dto.address.line2 ?? null,
-              city: dto.address.city,
-              regionId,
-              postalCode: dto.address.postalCode,
-              countryId,
-              latitude: coordinates.latitude.toFixed(6),
-              longitude: coordinates.longitude.toFixed(6),
-              fingerprint,
-            })
-            .onConflictDoNothing({ target: addresses.fingerprint })
-            .returning();
-
-          const address =
-            inserted[0] ??
-            (await tx
+        const address =
+          inserted[0] ??
+          (
+            await tx
               .select()
               .from(addresses)
               .where(eq(addresses.fingerprint, fingerprint))
-              .limit(1))[0];
+              .limit(1)
+          )[0];
 
-          if (!address) {
-            throw new ConflictException(
-              'Address could not be stored despite a stable fingerprint',
-            );
+        if (!address) {
+          throw new ConflictException(
+            'Address could not be stored despite a stable fingerprint',
+          );
+        }
+
+        const [order] = await tx
+          .insert(orders)
+          .values({
+            customerId: dto.customerId,
+            warehouseId: null,
+            shippingAddressId: address.id,
+            subtotalAmount,
+            totalAmount,
+            currency,
+            shippingLine1: dto.address.line1,
+            shippingLine2: dto.address.line2 ?? null,
+            shippingCity: dto.address.city,
+            shippingRegion: dto.address.region,
+            shippingPostalCode: dto.address.postalCode,
+            shippingCountry: dto.address.country,
+            shippingLatitude: coordinates.latitude.toFixed(6),
+            shippingLongitude: coordinates.longitude.toFixed(6),
+            idempotencyKey: idempotencyKey,
+            idempotencyRequestHash: requestHash,
+            state: 'created',
+          })
+          .returning();
+
+        await tx.insert(orderItems).values(
+          pricedLineItems.map((line) => ({
+            orderId: order.id,
+            productId: line.product.id,
+            productName: line.product.name,
+            sku: line.product.sku,
+            unitPriceAmount: line.unitPriceAmount,
+            quantity: line.quantity,
+            lineTotalAmount: line.lineTotalAmount,
+            currency,
+          })),
+        );
+
+        for (const warehouse of candidates) {
+          try {
+            await this.inventory.reserve(tx, warehouse.id, dto.items);
+          } catch (error) {
+            // Stock ran out at this warehouse past candidate selection; fall
+            // back to the next-nearest warehouse that could fulfil the order.
+            if (error instanceof ConflictException) {
+              continue;
+            }
+            throw error;
           }
 
-          const [order] = await tx
-            .insert(orders)
-            .values({
-              customerId: dto.customerId,
-              warehouseId: warehouse.id,
-              shippingAddressId: address.id,
-              subtotalAmount,
-              totalAmount,
-              currency,
-              shippingLine1: dto.address.line1,
-              shippingLine2: dto.address.line2 ?? null,
-              shippingCity: dto.address.city,
-              shippingRegion: dto.address.region,
-              shippingPostalCode: dto.address.postalCode,
-              shippingCountry: dto.address.country,
-              shippingLatitude: coordinates.latitude.toFixed(6),
-              shippingLongitude: coordinates.longitude.toFixed(6),
-              idempotencyKey: idempotencyKey ?? null,
-            })
+          const [activated] = await tx
+            .update(orders)
+            .set({ state: 'active', warehouseId: warehouse.id })
+            .where(eq(orders.id, order.id))
             .returning();
-
-          await tx.insert(orderItems).values(
-            pricedLineItems.map((line) => ({
-              orderId: order.id,
-              productId: line.product.id,
-              productName: line.product.name,
-              sku: line.product.sku,
-              unitPriceAmount: line.unitPriceAmount,
-              quantity: line.quantity,
-              lineTotalAmount: line.lineTotalAmount,
-              currency,
-            })),
-          );
+          if (!activated) {
+            throw new ConflictException(
+              `Order ${order.id} disappeared before it could be activated`,
+            );
+          }
 
           const payment = await this.payments.charge({
             creditCardNumber: dto.creditCardNumber,
@@ -219,45 +240,46 @@ export class OrdersService {
             );
           }
 
-          return order;
-        });
+          return { order: activated, state: 'active' };
+        }
 
-        return {
-          order: this.toOrderResponse(
-            created,
-            pricedLineItems.map((line) => ({
-              productId: line.product.id,
-              sku: line.product.sku,
-              name: line.product.name,
-              quantity: line.quantity,
-              unitPriceAmount: line.unitPriceAmount.toString(),
-              lineTotalAmount: line.lineTotalAmount.toString(),
-            })),
-          ),
-          created: true,
-        };
-      } catch (error) {
-        if (
-          idempotencyKey &&
-          isUniqueViolation(error, 'orders_idempotency_key_unique')
-        ) {
-          const existing = await this.findByIdempotencyKey(idempotencyKey);
-          if (existing) {
-            return { order: existing, created: false };
-          }
+        // Every candidate was exhausted by the race window: keep the order
+        // (and the deduplicated address) and let the caller report the 409.
+        return { order, state: 'created' };
+      });
+    } catch (error) {
+      if (isUniqueViolation(error, 'orders_idempotency_key_unique')) {
+        // Two requests raced with the same new key; the loser attached to the
+        // committed winner instead of creating a duplicate order.
+        const replayed = await this.resolveIdempotentReplay(
+          idempotencyKey,
+          dto,
+        );
+        if (replayed) {
+          return { order: replayed, created: false };
         }
-        if (error instanceof ConflictException) {
-          // Stock ran out at this warehouse past candidate selection; fall
-          // back to the next-nearest warehouse that could fulfil the order.
-          continue;
-        }
-        throw error;
       }
+      throw error;
     }
 
-    throw new ConflictException(
-      'Insufficient stock to fulfil the order at any nearby warehouse',
-    );
+    if (outcome.state === 'created') {
+      throw this.unfulfilledOrderConflict(outcome.order.id);
+    }
+
+    return {
+      order: this.toOrderResponse(
+        outcome.order,
+        pricedLineItems.map((line) => ({
+          productId: line.product.id,
+          sku: line.product.sku,
+          name: line.product.name,
+          quantity: line.quantity,
+          unitPriceAmount: line.unitPriceAmount.toString(),
+          lineTotalAmount: line.lineTotalAmount.toString(),
+        })),
+      ),
+      created: true,
+    };
   }
 
   private async resolveProductMap(
@@ -320,9 +342,9 @@ export class OrdersService {
     return currency;
   }
 
-  private async findByIdempotencyKey(
+  private async findIdempotentOrder(
     key: string,
-  ): Promise<OrderResponse | null> {
+  ): Promise<{ order: OrderResponse; requestHash: string | null } | null> {
     const rows = await this.db
       .select({ order: orders, item: orderItems })
       .from(orders)
@@ -334,9 +356,91 @@ export class OrdersService {
     }
 
     const { order } = rows[0];
-    return this.toOrderResponse(
-      order,
-      rows.map((row) => this.toOrderItem(row.item)),
+    return {
+      requestHash: order.idempotencyRequestHash,
+      order: this.toOrderResponse(
+        order,
+        rows.map((row) => this.toOrderItem(row.item)),
+      ),
+    };
+  }
+
+  /**
+   * Resolves what an idempotency-key replay should answer, or `null` when the
+   * key has never been seen and a new order should be created:
+   *
+   * - no stored order            -> `null`
+   * - stored order is `active`   -> the stored order (no duplicate created)
+   * - stored order is `created`  -> throws the recorded-creation conflict; the
+   *                                 key stays bound to that failed outcome
+   *
+   * Either way, a replay whose payload differs from the stored request is a
+   * conflict — the stored order is never silently returned for a request it
+   * does not match.
+   */
+  private async resolveIdempotentReplay(
+    idempotencyKey: string,
+    dto: CreateOrderDto,
+  ): Promise<OrderResponse | null> {
+    const existing = await this.findIdempotentOrder(idempotencyKey);
+    if (!existing) {
+      return null;
+    }
+
+    this.assertReplayMatchesPayload(existing.requestHash, dto, idempotencyKey);
+    if (existing.order.state !== 'active') {
+      throw this.unfulfilledOrderConflict(existing.order.id);
+    }
+    return existing.order;
+  }
+
+  /**
+   * Returns the canonical hash of the parts of the request that determine the
+   * order (customer, address and line items). The credit card is deliberately
+   * excluded — it does not change what the order IS, only how it is paid for.
+   */
+  private computeIdempotencyRequestHash(dto: CreateOrderDto): string {
+    const canonicalPayload = {
+      customerId: dto.customerId,
+      address: buildFingerprint(dto.address),
+      items: [...dto.items]
+        .sort((a, b) => a.productId - b.productId)
+        .map((item) => ({
+          productId: item.productId,
+          quantity: item.quantity,
+        })),
+    };
+    return createHash('sha256')
+      .update(JSON.stringify(canonicalPayload))
+      .digest('hex');
+  }
+
+  /**
+   * One idempotency key = one outcome. A replay must carry the same order
+   * payload as the stored request; reusing the key with a different payload is
+   * client misuse and is reported as a conflict rather than silently returning
+   * a stored order that no longer matches what the client asked for.
+   */
+  private assertReplayMatchesPayload(
+    requestHash: string | null,
+    dto: CreateOrderDto,
+    key: string,
+  ): void {
+    if (
+      requestHash !== null &&
+      requestHash !== this.computeIdempotencyRequestHash(dto)
+    ) {
+      throw new ConflictException(
+        `Idempotency key ${key} was already used with a different payload`,
+      );
+    }
+  }
+
+  private unfulfilledOrderConflict(orderId: number): ConflictException {
+    return new ConflictException(
+      `Order ${orderId} could not be fulfilled (stock ran out at every nearby warehouse during reservation). ` +
+        `It is recorded with state 'created', no stock was reserved and nothing was charged. ` +
+        `Retry with a new idempotency key to attempt it again`,
     );
   }
 
@@ -359,6 +463,7 @@ export class OrdersService {
       id: order.id,
       customerId: order.customerId,
       warehouseId: order.warehouseId,
+      state: order.state,
       subtotalAmount: order.subtotalAmount.toString(),
       totalAmount: order.totalAmount.toString(),
       currency: order.currency,

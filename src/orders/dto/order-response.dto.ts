@@ -11,6 +11,7 @@ export interface OrderResponse {
   id: number;
   customerId: number;
   warehouseId: number | null;
+  state: 'created' | 'active';
   subtotalAmount: string;
   totalAmount: string;
   currency: string;

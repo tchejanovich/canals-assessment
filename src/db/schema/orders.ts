@@ -3,6 +3,7 @@ import {
   char,
   index,
   numeric,
+  pgEnum,
   pgTable,
   text,
   timestamp,
@@ -11,6 +12,17 @@ import {
 import { addresses } from './addresses.js';
 import { customers } from './customers.js';
 import { warehouses } from './warehouses.js';
+
+/**
+ * An order is `created` as soon as its header and lines are persisted, while
+ * stock reservation is still being attempted. It is flipped to `active` the
+ * moment a warehouse reservation succeeds (and the payment is approved).
+ * `created` orders are kept deliberately: they are the trace of a race that
+ * the nearest-first fallback failed to win, and their id is reported in the
+ * 409 response. A `created` order has no warehouse assigned and is NOT
+ * shippable; anything reading fulfillable orders must filter on `active`.
+ */
+export const orderState = pgEnum('order_state', ['created', 'active']);
 
 /**
  * Order header. The shipping address is snapshotted onto the order so later
@@ -52,6 +64,8 @@ export const orders = pgTable(
       scale: 6,
     }).notNull(),
     idempotencyKey: text('idempotency_key'),
+    idempotencyRequestHash: text('idempotency_request_hash'),
+    state: orderState('state').notNull().default('active'),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -59,6 +73,7 @@ export const orders = pgTable(
   (table) => [
     index('orders_customer_id_idx').on(table.customerId),
     index('orders_created_at_idx').on(table.createdAt),
+    index('orders_state_created_at_idx').on(table.state, table.createdAt),
     uniqueIndex('orders_idempotency_key_unique').on(table.idempotencyKey),
   ],
 );
