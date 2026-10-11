@@ -8,10 +8,8 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { createHash } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { AddressesService } from '../addresses/addresses.service.js';
-import { buildAddressFingerprint } from '../addresses/address-fingerprint.js';
 import type { Coordinates } from '../common/geo.js';
 import { CustomersService } from '../customers/customers.service.js';
 import {
@@ -23,7 +21,6 @@ import {
   countries,
   orderItems,
   type Order,
-  type OrderItem,
   orders,
   type Product,
   regions,
@@ -45,24 +42,19 @@ import type {
   OrderItemResponse,
   OrderResponse,
 } from './dto/order-response.dto.js';
+import {
+  assertReplayMatchesPayload,
+  computeIdempotencyRequestHash,
+  isUniqueViolation,
+} from './orders.idempotency.js';
+import { toOrderItem, toOrderResponse } from './orders.mapper.js';
+import {
+  buildPricedLineItems,
+  calculateSubtotal,
+  validateAndResolveCurrency,
+} from './orders.pricing.js';
 import { OrderState } from './order-state.js';
 import type { PricedLineItem } from './orders.types.js';
-
-function isUniqueViolation(error: unknown, constraint: string): boolean {
-  if (typeof error !== 'object' || error === null) {
-    return false;
-  }
-  const candidate = error as {
-    code?: string;
-    constraint_name?: string;
-    constraint?: string;
-  };
-  return (
-    candidate.code === '23505' &&
-    (candidate.constraint_name === constraint ||
-      candidate.constraint === constraint)
-  );
-}
 
 /**
  * How many nearest-first warehouses are tried before giving up. Candidates
@@ -102,10 +94,10 @@ export class OrdersService {
 
     const productById = await this.resolveProductMap(dto);
 
-    const pricedLineItems = this.buildPricedLineItems(dto, productById);
-    const subtotalAmount = this.calculateSubtotal(pricedLineItems);
+    const pricedLineItems = buildPricedLineItems(dto, productById);
+    const subtotalAmount = calculateSubtotal(pricedLineItems);
 
-    const currency = this.validateAndResolveCurrency(pricedLineItems);
+    const currency = validateAndResolveCurrency(pricedLineItems);
 
     const countryId = await this.resolveCountry(dto.address.country);
     const regionId = await this.resolveRegion(countryId, dto.address.region);
@@ -124,7 +116,7 @@ export class OrdersService {
     }
 
     const totalAmount = subtotalAmount;
-    const requestHash = this.computeIdempotencyRequestHash(dto);
+    const requestHash = computeIdempotencyRequestHash(dto);
 
     let outcome: { order: Order; state: OrderState };
     try {
@@ -185,7 +177,7 @@ export class OrdersService {
 
     const finalized = await this.finalizeReservedOrder(outcome.order, dto);
     return {
-      order: this.toOrderResponse(
+      order: toOrderResponse(
         finalized,
         pricedLineItems.map((line) => ({
           productId: line.product.id,
@@ -327,41 +319,6 @@ export class OrdersService {
     return productById;
   }
 
-  private buildPricedLineItems(
-    dto: CreateOrderDto,
-    productById: Map<number, Product>,
-  ): PricedLineItem[] {
-    return dto.items.map((item) => {
-      const product = productById.get(item.productId)!;
-      const lineTotalAmount = product.priceAmount * BigInt(item.quantity);
-      return {
-        product,
-        quantity: item.quantity,
-        unitPriceAmount: product.priceAmount,
-        lineTotalAmount,
-      };
-    });
-  }
-
-  private calculateSubtotal(pricedLineItems: PricedLineItem[]): bigint {
-    return pricedLineItems.reduce(
-      (sum, line) => sum + line.lineTotalAmount,
-      0n,
-    );
-  }
-
-  private validateAndResolveCurrency(
-    pricedLineItems: PricedLineItem[],
-  ): string {
-    const currency = pricedLineItems[0].product.currency;
-    if (pricedLineItems.some((line) => line.product.currency !== currency)) {
-      throw new BadRequestException(
-        'All products in an order must share the same currency',
-      );
-    }
-    return currency;
-  }
-
   private async findIdempotentOrder(key: string): Promise<{
     order: Order;
     items: OrderItemResponse[];
@@ -381,7 +338,7 @@ export class OrdersService {
     return {
       order,
       requestHash: order.idempotencyRequestHash,
-      items: rows.map((row) => this.toOrderItem(row.item)),
+      items: rows.map((row) => toOrderItem(row.item)),
     };
   }
 
@@ -415,14 +372,14 @@ export class OrdersService {
       return null;
     }
 
-    this.assertReplayMatchesPayload(existing.requestHash, dto, idempotencyKey);
+    assertReplayMatchesPayload(existing.requestHash, dto, idempotencyKey);
 
     switch (existing.order.state) {
       case OrderState.Active:
-        return this.toOrderResponse(existing.order, existing.items);
+        return toOrderResponse(existing.order, existing.items);
       case OrderState.Reserved: {
         const finalized = await this.finalizeReservedOrder(existing.order, dto);
-        return this.toOrderResponse(finalized, existing.items);
+        return toOrderResponse(finalized, existing.items);
       }
       case OrderState.Cancelled:
         throw new HttpException(
@@ -464,18 +421,7 @@ export class OrdersService {
       );
     }
 
-    const [activated] = await this.db.transaction(async (tx) =>
-      tx
-        .update(orders)
-        .set({ state: OrderState.Active })
-        .where(
-          and(
-            eq(orders.id, reservedOrder.id),
-            eq(orders.state, OrderState.Reserved),
-          ),
-        )
-        .returning(),
-    );
+    const activated = await this.activateOrder(reservedOrder.id);
     if (activated) {
       return activated;
     }
@@ -488,6 +434,23 @@ export class OrdersService {
       .where(eq(orders.id, reservedOrder.id))
       .limit(1);
     return current ?? reservedOrder;
+  }
+
+  /**
+   * Flips a `reserved` order to `active` in its own tiny transaction. Guarded
+   * on the current state so a concurrent finalizer cannot double-activate: if
+   * the order already moved on, no row matches and `null` is returned.
+   */
+  private async activateOrder(orderId: number): Promise<Order | null> {
+    const [activated] = await this.db.transaction(async (tx) =>
+      tx
+        .update(orders)
+        .set({ state: OrderState.Active })
+        .where(and(eq(orders.id, orderId), eq(orders.state, OrderState.Reserved)))
+        .returning(),
+    );
+
+    return activated ?? null;
   }
 
   /**
@@ -517,92 +480,12 @@ export class OrdersService {
     });
   }
 
-  /**
-   * Returns the canonical hash of the parts of the request that determine the
-   * order (customer, address and line items). The credit card is deliberately
-   * excluded — it does not change what the order IS, only how it is paid for.
-   */
-  private computeIdempotencyRequestHash(dto: CreateOrderDto): string {
-    const canonicalPayload = {
-      customerId: dto.customerId,
-      address: buildAddressFingerprint(dto.address),
-      items: [...dto.items]
-        .sort((a, b) => a.productId - b.productId)
-        .map((item) => ({
-          productId: item.productId,
-          quantity: item.quantity,
-        })),
-    };
-    return createHash('sha256')
-      .update(JSON.stringify(canonicalPayload))
-      .digest('hex');
-  }
-
-  /**
-   * One idempotency key = one outcome. A replay must carry the same order
-   * payload as the stored request; reusing the key with a different payload is
-   * client misuse and is reported as a conflict rather than silently returning
-   * a stored order that no longer matches what the client asked for.
-   */
-  private assertReplayMatchesPayload(
-    requestHash: string | null,
-    dto: CreateOrderDto,
-    key: string,
-  ): void {
-    if (
-      requestHash !== null &&
-      requestHash !== this.computeIdempotencyRequestHash(dto)
-    ) {
-      throw new ConflictException(
-        `Idempotency key ${key} was already used with a different payload`,
-      );
-    }
-  }
-
   private unfulfilledOrderConflict(orderId: number): ConflictException {
     return new ConflictException(
       `Order ${orderId} could not be fulfilled (stock ran out at every nearby warehouse during reservation). ` +
         `It is recorded with state '${OrderState.Created}', no stock was reserved and nothing was charged. ` +
         `Retry with a new idempotency key to attempt it again`,
     );
-  }
-
-  private toOrderItem(item: OrderItem): OrderItemResponse {
-    return {
-      productId: item.productId,
-      sku: item.sku,
-      name: item.productName,
-      quantity: item.quantity,
-      unitPriceAmount: item.unitPriceAmount.toString(),
-      lineTotalAmount: item.lineTotalAmount.toString(),
-    };
-  }
-
-  private toOrderResponse(
-    order: Order,
-    items: OrderItemResponse[],
-  ): OrderResponse {
-    return {
-      id: order.id,
-      customerId: order.customerId,
-      warehouseId: order.warehouseId,
-      state: order.state,
-      subtotalAmount: order.subtotalAmount.toString(),
-      totalAmount: order.totalAmount.toString(),
-      currency: order.currency,
-      shippingAddress: {
-        line1: order.shippingLine1,
-        line2: order.shippingLine2,
-        city: order.shippingCity,
-        region: order.shippingRegion,
-        postalCode: order.shippingPostalCode,
-        country: order.shippingCountry,
-        latitude: Number(order.shippingLatitude),
-        longitude: Number(order.shippingLongitude),
-      },
-      items,
-      createdAt: order.createdAt.toISOString(),
-    };
   }
 
   private async resolveCountry(countryCode: string): Promise<number> {
