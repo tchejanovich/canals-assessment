@@ -62,21 +62,28 @@
       "idx": 8,
       "version": "7",
       "when": 1791684004316,
-      "tag": "0008_mute_strong_guy",
+      "tag": "0008_drop_address_geocoded_at",
       "breakpoints": true
     },
     {
       "idx": 9,
       "version": "7",
       "when": 1791684432090,
-      "tag": "0009_hot_wendell_rand",
+      "tag": "0009_add_inventory",
       "breakpoints": true
     },
     {
       "idx": 10,
       "version": "7",
       "when": 1791685631186,
-      "tag": "0010_freezing_iron_lad",
+      "tag": "0010_drop_order_status",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1791686389379,
+      "tag": "0011_seed_initial_data",
       "breakpoints": true
     }
   ]
