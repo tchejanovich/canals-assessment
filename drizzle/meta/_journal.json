@@ -85,6 +85,13 @@
       "when": 1791686389379,
       "tag": "0011_seed_initial_data",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1791687957748,
+      "tag": "0012_add_order_idempotency_key",
+      "breakpoints": true
     }
   ]
 }

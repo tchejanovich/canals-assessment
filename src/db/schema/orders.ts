@@ -6,6 +6,7 @@ import {
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 import { addresses } from './addresses.js';
 import { customers } from './customers.js';
@@ -50,6 +51,7 @@ export const orders = pgTable(
       precision: 9,
       scale: 6,
     }).notNull(),
+    idempotencyKey: text('idempotency_key'),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -60,6 +62,7 @@ export const orders = pgTable(
   (table) => [
     index('orders_customer_id_idx').on(table.customerId),
     index('orders_created_at_idx').on(table.createdAt),
+    uniqueIndex('orders_idempotency_key_unique').on(table.idempotencyKey),
   ],
 );
 

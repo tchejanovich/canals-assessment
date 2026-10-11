@@ -25,6 +25,73 @@
 
 [Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
 
+## Technical decisions
+
+### Database
+
+**Countries and regions live in their own tables**
+
+Countries and regions are reference (lookup) data referenced by both `addresses`
+and `warehouses`. Modeling them as tables rather than free-text columns:
+
+- Removes duplication and keeps a single spelling/source of truth for every
+  country and first-level region, instead of repeating (and mistyping) strings
+  across rows.
+- Enforces integrity at the database level: `addresses` and `warehouses` hold
+  `country_id` / `region_id` foreign keys, and a region's code is unique within
+  its country, so an invalid or inconsistent state can't be stored.
+- Gives stable ids and codes (ISO-3166 country codes, state codes) to join and
+  aggregate on, and lets new countries/regions be added as data rather than a
+  schema change.
+
+**Warehouses embed their address, customers use the `addresses` table**
+
+A warehouse's address is an intrinsic, single (1:1) attribute of the facility:
+each warehouse has exactly one, it never pluralizes, and it changes rarely. It is
+therefore stored inline on the `warehouses` row rather than in `addresses`. This
+avoids a join and a foreign key that could only ever point to one row, and keeps
+the warehouse self-contained.
+
+Customer addresses are different in nature, which is why they get their own
+table:
+
+- A customer can have many addresses (1:N).
+- Addresses are shared, deduplicated data: a normalised `fingerprint` with a
+  unique index means the same physical address (and its geocoded coordinates)
+  is only stored/geocoded once, even across customers.
+- They are mutable — a customer can edit them — so they're kept as independent
+  records rather than copied inline.
+
+Because orders snapshot the chosen shipping address at purchase time, later edits
+to a customer's `addresses` row (or an update to a warehouse's inline address) do
+not rewrite historical order data.
+
+### Mocks
+
+External integrations are mocked so the project runs without third-party
+credentials or network access. Each mock keeps the same async, typed contract as
+the real dependency, so it can be swapped for a real client later without
+changing callers.
+
+**Geocoding — `GeocodingService.getCoordinates`**
+
+A real geocoder turns a postal address into latitude/longitude. The mock instead
+derives them *deterministically* from the normalised address:
+
+- the address is lower-cased, trimmed and joined into one string;
+- an FNV-1a hash reduces that string to a stable 32-bit integer;
+- the integer is mapped onto the standard coordinate ranges — latitude
+  `(hash % 1801) / 10 - 90` → −90.0…90.0, longitude
+  `(hash("<address>|lon") % 3601) / 10 - 180` → −180.0…180.0. Hashing the address
+  a second time with a `|lon` suffix (domain separation) keeps latitude and
+  longitude independent.
+
+Determinism is the point: the same address must always resolve to the same
+coordinates, otherwise idempotent order replays, the coordinates stored on
+`addresses`, and distance-based warehouse selection would be non-reproducible and
+untestable. The returned coordinates are *not* geographically accurate — the mock
+mimics the interface and the determinism of a real geocoder, not its accuracy.
+
 ## Project setup
 
 ```bash
