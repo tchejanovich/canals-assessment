@@ -53,7 +53,7 @@ export class OrderFinalizationService {
             `Order ${orderId} payment captured (capture ${payment.captureId})`,
           );
         }
-        return this.finishActivation(orderId, reservedOrder, {
+        return this.finishActivation(orderId, {
           captureId: payment.captureId,
           capturedAt: payment.capturedAt ?? new Date(),
         });
@@ -83,18 +83,20 @@ export class OrderFinalizationService {
 
   /**
    * Flips a reserved order to active and records capture in one transaction.
-   * If another finalizer won, reload its committed order.
+   * If another finalizer won, return its committed order instead.
    */
   private async finishActivation(
     orderId: number,
-    reservedOrder: Order,
     capture: { captureId: string; capturedAt: Date },
   ): Promise<Order> {
     const activated = await this.activateOrder(orderId, capture);
-    // Return our updated row when this transaction wins activation.
     if (activated) return activated;
-    // Otherwise reload the latest state, falling back if its row is missing.
-    return (await this.reloadOrder(orderId)) ?? reservedOrder;
+
+    const latest = await this.reloadOrder(orderId);
+    if (!latest) {
+      throw new Error(`Order ${orderId} disappeared after payment capture`);
+    }
+    return latest;
   }
 
   private async activateOrder(
