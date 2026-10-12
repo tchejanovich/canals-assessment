@@ -3,27 +3,14 @@ import { randomUUID } from 'node:crypto';
 import { cardLast4 } from './card.js';
 import { PaymentStatus } from './payment-status.js';
 import type {
+  AuthorizationRecord,
   AuthorizeInput,
   AuthorizeResult,
   CaptureInput,
   CaptureResult,
   VoidInput,
   VoidResult,
-} from './payments.types.js';
-
-type AuthorizationStatus = Exclude<
-  PaymentStatus,
-  | typeof PaymentStatus.Authorizing
-  | typeof PaymentStatus.Declined
-  | typeof PaymentStatus.Failed
->;
-
-interface AuthorizationRecord {
-  amount: bigint;
-  last4: string;
-  status: AuthorizationStatus;
-  captureId: string | null;
-}
+} from './payments.api.types.js';
 
 /**
  * In-memory stand-in for a card processor. A real provider exposes three calls

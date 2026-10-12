@@ -90,12 +90,15 @@ export class OrderFinalizationService {
     capture: { captureId: string; capturedAt: Date },
   ): Promise<Order> {
     const activated = await this.activateOrder(orderId, capture);
+    // Return the active row when this request wins the guarded update.
     if (activated) return activated;
 
     const latest = await this.reloadOrder(orderId);
+    // Missing after a captured payment is an invariant failure, not a fallback case.
     if (!latest) {
       throw new Error(`Order ${orderId} disappeared after payment capture`);
     }
+    // Another finalizer won, so return its committed row.
     return latest;
   }
 
