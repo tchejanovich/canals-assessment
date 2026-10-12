@@ -14,19 +14,34 @@ import { IdempotencyKeyReusedError } from './orders.errors.js';
  * deliberately generic so it can guard any unique index.
  */
 export function isUniqueViolation(error: unknown, constraint: string): boolean {
-  if (typeof error !== 'object' || error === null) {
-    return false;
+  const seen = new Set<object>();
+  let current = error;
+
+  while (
+    typeof current === 'object' &&
+    current !== null &&
+    !seen.has(current)
+  ) {
+    seen.add(current);
+    const candidate = current as {
+      code?: unknown;
+      constraint_name?: unknown;
+      constraint?: unknown;
+      cause?: unknown;
+    };
+
+    if (
+      candidate.code === '23505' &&
+      (candidate.constraint_name === constraint ||
+        candidate.constraint === constraint)
+    ) {
+      return true;
+    }
+
+    current = candidate.cause;
   }
-  const candidate = error as {
-    code?: string;
-    constraint_name?: string;
-    constraint?: string;
-  };
-  return (
-    candidate.code === '23505' &&
-    (candidate.constraint_name === constraint ||
-      candidate.constraint === constraint)
-  );
+
+  return false;
 }
 
 /**
@@ -38,10 +53,17 @@ export function isUniqueViolation(error: unknown, constraint: string): boolean {
 export function computeIdempotencyRequestFingerprint(
   dto: CreateOrderDto,
 ): string {
+  return computeRequestFingerprint(dto, buildAddressFingerprint(dto.address));
+}
+
+function computeRequestFingerprint(
+  dto: CreateOrderDto,
+  addressFingerprint: string,
+): string {
   const canonicalPayload = {
     creditCardNumber: dto.creditCardNumber,
     customerId: dto.customerId,
-    address: buildAddressFingerprint(dto.address),
+    address: addressFingerprint,
     items: [...dto.items]
       .sort((a, b) => a.productId - b.productId)
       .map((item) => ({
@@ -63,10 +85,7 @@ export function assertReplayMatchesPayload(
   dto: CreateOrderDto,
   key: string,
 ): void {
-  if (
-    requestFingerprint !== null &&
-    requestFingerprint !== computeIdempotencyRequestFingerprint(dto)
-  ) {
+  if (requestFingerprint !== computeIdempotencyRequestFingerprint(dto)) {
     throw new IdempotencyKeyReusedError(key);
   }
 }

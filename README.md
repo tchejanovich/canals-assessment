@@ -90,9 +90,10 @@ Customer addresses are different in nature, which is why they get their own
 table:
 
 - A customer can have many addresses (1:N).
-- Addresses are shared, deduplicated data: a normalised `fingerprint` with a
-  unique index means the same physical address (and its geocoded coordinates)
-  is only stored/geocoded once, even across customers.
+- Addresses are shared, deduplicated data: a canonical `fingerprint` with a
+  unique index means the same address reuses its stored coordinates rather than
+  being geocoded again on subsequent orders, even across customers. Simultaneous
+  first requests for an address may both geocode before one address row wins.
 - They are mutable — a customer can edit them — so they're kept as independent
   records rather than copied inline.
 
@@ -343,15 +344,16 @@ changing callers.
 **Geocoding — `GeocodingService.getCoordinates`**
 
 A real geocoder turns a postal address into latitude/longitude. The mock instead
-derives them *deterministically* from the normalised address:
+derives them *deterministically* from the normalized address:
 
-- the address is lower-cased, trimmed and joined into one string;
-- an FNV-1a hash reduces that string to a stable 32-bit integer;
+- each address field is trimmed and lower-cased, then serialized as a JSON array
+  in a fixed order (internal whitespace is preserved, and field boundaries are
+  unambiguous);
+- FNV-1a hashes that canonical array with separate `latitude` and `longitude`
+  labels, producing independent stable 32-bit integers;
 - the integer is mapped onto the standard coordinate ranges — latitude
-  `(hash % 1801) / 10 - 90` → −90.0…90.0, longitude
-  `(hash("<address>|lon") % 3601) / 10 - 180` → −180.0…180.0. Hashing the address
-  a second time with a `|lon` suffix (domain separation) keeps latitude and
-  longitude independent.
+  `(latitudeHash % 1801) / 10 - 90` → −90.0…90.0, longitude
+  `(longitudeHash % 3601) / 10 - 180` → −180.0…180.0.
 
 Determinism is the point: the same address must always resolve to the same
 coordinates, otherwise idempotent order replays, the coordinates stored on

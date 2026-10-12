@@ -14,7 +14,6 @@ import {
   orders,
   type Product,
 } from '../db/schema/index.js';
-import { GeocodingService } from '../geocoding/geocoding.service.js';
 import { InsufficientStockError } from '../inventory/inventory.errors.js';
 import { InventoryService } from '../inventory/inventory.service.js';
 import { PaymentStatus } from '../payments/payment-status.js';
@@ -82,7 +81,6 @@ export class OrdersService {
     private readonly customers: CustomersService,
     private readonly addresses: AddressesService,
     private readonly products: ProductsService,
-    private readonly geocoding: GeocodingService,
     private readonly warehouses: WarehousesService,
     private readonly inventory: InventoryService,
     private readonly payments: PaymentsService,
@@ -136,7 +134,7 @@ export class OrdersService {
       dto.address.region,
     );
 
-    const coordinates = await this.geocoding.getCoordinates(dto.address);
+    const coordinates = await this.addresses.resolveCoordinates(dto.address);
 
     const candidates = await this.warehouses.findFulfillingWarehouses(
       dto.items,
@@ -165,12 +163,16 @@ export class OrdersService {
           countryId,
           coordinates,
         });
+        const addressCoordinates = {
+          latitude: Number(address.latitude),
+          longitude: Number(address.longitude),
+        };
 
         const order = await this.insertOrderWithItems(tx, {
           customerId: dto.customerId,
           shippingAddressId: address.id,
           address: dto.address,
-          coordinates,
+          coordinates: addressCoordinates,
           subtotalAmount,
           totalAmount,
           currency,

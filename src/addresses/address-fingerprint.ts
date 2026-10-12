@@ -1,24 +1,39 @@
 import type { AddressParts } from './addresses.types.js';
 
-function normalizePart(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, ' ');
+export type NormalizedAddressParts = [
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+];
+
+export function normalizeAddressPart(value: string | null | undefined): string {
+  return (value ?? '').trim().toLowerCase();
+}
+
+export function normalizeAddressParts(
+  address: AddressParts,
+): NormalizedAddressParts {
+  return [
+    normalizeAddressPart(address.line1),
+    normalizeAddressPart(address.line2),
+    normalizeAddressPart(address.city),
+    normalizeAddressPart(address.region),
+    normalizeAddressPart(address.postalCode),
+    normalizeAddressPart(address.country),
+  ];
+}
+
+export function serializeCanonicalAddress(address: AddressParts): string {
+  return JSON.stringify(normalizeAddressParts(address));
 }
 
 /**
- * Stable identity of an address, used to deduplicate rows in `addresses` (and,
- * by the order service, to canonicalise the address inside the idempotency
- * request hash). Case- and whitespace-insensitive so the same address always
- * collapses onto one row.
+ * Unambiguous identity of an address. JSON encoding preserves field boundaries
+ * even when a field contains punctuation such as `|`.
  */
 export function buildAddressFingerprint(address: AddressParts): string {
-  return [
-    address.line1,
-    address.line2 ?? '',
-    address.city,
-    address.region,
-    address.postalCode,
-    address.country,
-  ]
-    .map(normalizePart)
-    .join('|');
+  return serializeCanonicalAddress(address);
 }

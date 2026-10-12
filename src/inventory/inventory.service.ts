@@ -21,26 +21,26 @@ export class InventoryService {
     // Lock inventory rows in a globally consistent order so concurrent
     // orders sharing products never acquire row locks in opposite order
     // (a classic deadlock even when every single row is stock-sufficient).
-    const ordered = [...requests].sort((a, b) => a.productId - b.productId);
+    const linteItems = [...requests].sort((a, b) => a.productId - b.productId);
 
-    for (const request of ordered) {
+    for (const linteItem of linteItems) {
       const updated = await tx
         .update(inventory)
         .set({
-          quantity: sql`${inventory.quantity} - ${request.quantity}`,
+          quantity: sql`${inventory.quantity} - ${linteItem.quantity}`,
           updatedAt: new Date(),
         })
         .where(
           and(
             eq(inventory.warehouseId, warehouseId),
-            eq(inventory.productId, request.productId),
-            gte(inventory.quantity, request.quantity),
+            eq(inventory.productId, linteItem.productId),
+            gte(inventory.quantity, linteItem.quantity),
           ),
         )
         .returning({ id: inventory.id });
 
       if (updated.length !== 1) {
-        throw new InsufficientStockError(request.productId);
+        throw new InsufficientStockError(linteItem.productId);
       }
     }
   }

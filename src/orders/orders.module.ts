@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AddressesModule } from '../addresses/addresses.module.js';
 import { CustomersModule } from '../customers/customers.module.js';
-import { GeocodingModule } from '../geocoding/geocoding.module.js';
 import { InventoryModule } from '../inventory/inventory.module.js';
 import { PaymentsModule } from '../payments/payments.module.js';
 import { ProductsModule } from '../products/products.module.js';
@@ -14,7 +13,6 @@ import { OrdersService } from './orders.service.js';
     AddressesModule,
     CustomersModule,
     ProductsModule,
-    GeocodingModule,
     WarehousesModule,
     InventoryModule,
     PaymentsModule,

@@ -1,16 +1,18 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull, or } from 'drizzle-orm';
 import {
   DATABASE,
   type Database,
   type DatabaseTransaction,
 } from '../db/database.module.js';
+import type { Coordinates } from '../common/geo.js';
 import {
   type Address,
   addresses,
   countries,
   regions,
 } from '../db/schema/index.js';
+import { GeocodingService } from '../geocoding/geocoding.service.js';
 import { buildAddressFingerprint } from './address-fingerprint.js';
 import {
   AddressConflictError,
@@ -19,9 +21,51 @@ import {
 } from './addresses.errors.js';
 import type { StoreAddressInput } from './addresses.types.js';
 
+type AddressWithCoordinates = Address & {
+  latitude: NonNullable<Address['latitude']>;
+  longitude: NonNullable<Address['longitude']>;
+};
+
 @Injectable()
 export class AddressesService {
-  constructor(@Inject(DATABASE) private readonly db: Database) {}
+  constructor(
+    @Inject(DATABASE) private readonly db: Database,
+    private readonly geocoding: GeocodingService,
+  ) {}
+
+  /** Resolve an address to the same precision used by persisted coordinates. */
+  async resolveCoordinates(
+    address: StoreAddressInput['address'],
+  ): Promise<Coordinates> {
+    const existingAddress = await this.findExisting(address);
+    const resolved = existingAddress
+      ? {
+          latitude: Number(existingAddress.latitude),
+          longitude: Number(existingAddress.longitude),
+        }
+      : await this.geocoding.getCoordinates(address);
+
+    return {
+      latitude: Number(resolved.latitude.toFixed(6)),
+      longitude: Number(resolved.longitude.toFixed(6)),
+    };
+  }
+
+  /** Look up a cached address without creating a row before stock is checked. */
+  async findExisting(
+    address: StoreAddressInput['address'],
+  ): Promise<AddressWithCoordinates | null> {
+    const fingerprint = buildAddressFingerprint(address);
+    const [existing] = await this.db
+      .select()
+      .from(addresses)
+      .where(eq(addresses.fingerprint, fingerprint))
+      .limit(1);
+
+    return existing && existing.latitude !== null && existing.longitude !== null
+      ? this.requireCoordinates(existing)
+      : null;
+  }
 
   /**
    * Idempotently persists the address and returns it. The `addresses` table is
@@ -37,8 +81,16 @@ export class AddressesService {
   async findOrCreate(
     tx: DatabaseTransaction,
     input: StoreAddressInput,
-  ): Promise<Address> {
+  ): Promise<AddressWithCoordinates> {
     const fingerprint = buildAddressFingerprint(input.address);
+    const [existing] = await tx
+      .select()
+      .from(addresses)
+      .where(eq(addresses.fingerprint, fingerprint))
+      .limit(1);
+    if (existing) {
+      return this.ensureCoordinates(tx, existing, input);
+    }
 
     const inserted = await tx
       .insert(addresses)
@@ -71,7 +123,51 @@ export class AddressesService {
       throw new AddressConflictError();
     }
 
-    return address;
+    return this.ensureCoordinates(tx, address, input);
+  }
+
+  private async ensureCoordinates(
+    tx: DatabaseTransaction,
+    address: Address,
+    input: StoreAddressInput,
+  ): Promise<AddressWithCoordinates> {
+    if (address.latitude !== null && address.longitude !== null) {
+      return this.requireCoordinates(address);
+    }
+
+    const [updated] = await tx
+      .update(addresses)
+      .set({
+        latitude: input.coordinates.latitude.toFixed(6),
+        longitude: input.coordinates.longitude.toFixed(6),
+      })
+      .where(
+        and(
+          eq(addresses.id, address.id),
+          or(isNull(addresses.latitude), isNull(addresses.longitude)),
+        ),
+      )
+      .returning();
+
+    if (updated) return this.requireCoordinates(updated);
+
+    const [current] = await tx
+      .select()
+      .from(addresses)
+      .where(eq(addresses.id, address.id))
+      .limit(1);
+    if (current && current.latitude !== null && current.longitude !== null) {
+      return this.requireCoordinates(current);
+    }
+
+    throw new AddressConflictError();
+  }
+
+  private requireCoordinates(address: Address): AddressWithCoordinates {
+    if (address.latitude === null || address.longitude === null) {
+      throw new AddressConflictError();
+    }
+    return address as AddressWithCoordinates;
   }
 
   /**
