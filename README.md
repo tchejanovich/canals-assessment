@@ -362,7 +362,7 @@ derives them *deterministically* from the normalized address:
 Determinism is the point: the same address must always resolve to the same
 coordinates, otherwise idempotent order replays, the coordinates stored on
 `addresses`, and distance-based warehouse selection would be non-reproducible and
-untestable. The returned coordinates are *not* geographically accurate — the mock
+unpredictable. The returned coordinates are *not* geographically accurate — the mock
 mimics the interface and the determinism of a real geocoder, not its accuracy.
 
 **Payments — `PaymentsService` and the mocked `PaymentsApi`**
@@ -530,19 +530,6 @@ $ npm run start:dev
 
 # production mode
 $ npm run start:prod
-```
-
-## Run tests
-
-```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
 ```
 
 ## Deployment

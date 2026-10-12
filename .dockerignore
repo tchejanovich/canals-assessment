@@ -4,7 +4,5 @@
 !.env.example
 node_modules
 dist
-coverage
-test
 *.tsbuildinfo
 global-bundle.pem
