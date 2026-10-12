@@ -7,7 +7,6 @@ import { InventoryService } from '../inventory/inventory.service.js';
 import { PaymentStatus } from '../payments/payment-status.js';
 import { PaymentsService } from '../payments/payments.service.js';
 import {
-  OrderPaymentDeclinedError,
   PaymentCaptureFailedError,
   PaymentDeclinedError,
   ReservedOrderMissingWarehouseError,
@@ -44,26 +43,13 @@ export class OrderFinalizationService {
 
     switch (payment.status) {
       case PaymentStatus.Captured:
-        if (payment.alreadyCaptured) {
-          this.logger.log(
-            `Order ${orderId} payment already captured (capture ${payment.captureId}); activating`,
-          );
-        } else {
-          this.logger.log(
-            `Order ${orderId} payment captured (capture ${payment.captureId})`,
-          );
-        }
-        return this.finishActivation(orderId, reservedOrder, {
-          captureId: payment.captureId,
-          capturedAt: payment.capturedAt ?? new Date(),
-        });
-
-      case PaymentStatus.Voided:
-        this.logger.warn(
-          `Order ${orderId} payment is voided; cancelling and restoring stock`,
+        this.logger.log(
+          `Order ${orderId} payment captured (capture ${payment.captureId})`,
         );
-        await this.cancelOrderAndRestoreStock(orderId, warehouseId, dto);
-        throw new OrderPaymentDeclinedError(orderId);
+        return this.activateOrder(orderId, {
+          captureId: payment.captureId,
+          capturedAt: payment.capturedAt,
+        });
 
       case PaymentStatus.Declined:
         this.logger.warn(
@@ -81,26 +67,10 @@ export class OrderFinalizationService {
     }
   }
 
-  /**
-   * Flips a reserved order to active and records capture in one transaction.
-   * If another finalizer won, reload its committed order.
-   */
-  private async finishActivation(
-    orderId: number,
-    reservedOrder: Order,
-    capture: { captureId: string; capturedAt: Date },
-  ): Promise<Order> {
-    const activated = await this.activateOrder(orderId, capture);
-    // Return our updated row when this transaction wins activation.
-    if (activated) return activated;
-    // Otherwise reload the latest state, falling back if its row is missing.
-    return (await this.reloadOrder(orderId)) ?? reservedOrder;
-  }
-
   private async activateOrder(
     orderId: number,
     capture: { captureId: string; capturedAt: Date },
-  ): Promise<Order | null> {
+  ): Promise<Order> {
     return this.db.transaction(async (tx) => {
       const [activated] = await tx
         .update(orders)
@@ -110,7 +80,11 @@ export class OrderFinalizationService {
         )
         .returning();
 
-      if (!activated) return null;
+      if (!activated) {
+        throw new Error(
+          `Order ${orderId} was not reserved when payment capture completed`,
+        );
+      }
 
       await this.payments.markCaptured(tx, orderId, capture);
       this.logger.log(
@@ -118,15 +92,6 @@ export class OrderFinalizationService {
       );
       return activated;
     });
-  }
-
-  private async reloadOrder(orderId: number): Promise<Order | null> {
-    const [order] = await this.db
-      .select()
-      .from(orders)
-      .where(eq(orders.id, orderId))
-      .limit(1);
-    return order ?? null;
   }
 
   /**

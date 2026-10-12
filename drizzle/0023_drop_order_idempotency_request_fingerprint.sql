@@ -1,0 +1,1 @@
+ALTER TABLE "orders" DROP COLUMN "idempotency_request_fingerprint";

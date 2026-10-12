@@ -15,8 +15,10 @@ import type {
   CreateOrderAddress,
   CreateOrderItem,
 } from './dto/create-order.dto.js';
-import { IDEMPOTENCY_CONFLICT } from './orders.idempotency.js';
-import { OrderVanishedError } from './orders.errors.js';
+import {
+  IdempotencyKeyConflictError,
+  OrderVanishedError,
+} from './orders.errors.js';
 import { OrderState } from './order-state.js';
 import type { PricedLineItem } from './orders.types.js';
 
@@ -32,19 +34,12 @@ export interface PlaceOrderInput {
   totalAmount: bigint;
   currency: string;
   idempotencyKey: string | null;
-  idempotencyRequestFingerprint: string | null;
   pricedLineItems: PricedLineItem[];
 }
 
-export type OrderPlacementResult =
-  | { kind: 'placed'; order: Order; state: OrderState }
-  | { kind: typeof IDEMPOTENCY_CONFLICT; error: IdempotencyKeyConflict };
-
-export class IdempotencyKeyConflict extends Error {
-  constructor() {
-    super('Order already exists for this idempotency key');
-    this.name = new.target.name;
-  }
+export interface OrderPlacementResult {
+  order: Order;
+  state: OrderState;
 }
 
 @Injectable()
@@ -58,56 +53,51 @@ export class OrderPlacementService {
   ) {}
 
   async placeOrder(input: PlaceOrderInput): Promise<OrderPlacementResult> {
-    try {
-      const result = await this.db.transaction(async (tx) => {
-        const address = await this.addresses.findOrCreate(tx, {
-          customerId: input.customerId,
-          address: input.address,
-          regionId: input.regionId,
-          countryId: input.countryId,
-          coordinates: input.coordinates,
-        });
-        const coordinates = {
-          latitude: Number(address.latitude),
-          longitude: Number(address.longitude),
-        };
-
-        const order = await this.insertOrderWithItems(tx, {
-          customerId: input.customerId,
-          shippingAddressId: address.id,
-          address: input.address,
-          coordinates,
-          subtotalAmount: input.subtotalAmount,
-          totalAmount: input.totalAmount,
-          currency: input.currency,
-          idempotencyKey: input.idempotencyKey,
-          idempotencyRequestFingerprint: input.idempotencyRequestFingerprint,
-          pricedLineItems: input.pricedLineItems,
-        });
-        if (!order) throw new IdempotencyKeyConflict();
-
-        const reserved = await this.tryReserveOrderStock(
-          tx,
-          order,
-          input.candidates,
-          input.items,
-        );
-        if (reserved) {
-          return { order: reserved, state: OrderState.Reserved };
-        }
-
-        // Every warehouse candidate was exhausted by the race window; retain the order
-        // so the caller can report the recorded conflict.
-        return { order, state: OrderState.Created };
+    return this.db.transaction(async (tx) => {
+      const address = await this.addresses.findOrCreate(tx, {
+        customerId: input.customerId,
+        address: input.address,
+        regionId: input.regionId,
+        countryId: input.countryId,
+        coordinates: input.coordinates,
       });
+      const coordinates = {
+        latitude: Number(address.latitude),
+        longitude: Number(address.longitude),
+      };
 
-      return { kind: 'placed', ...result };
-    } catch (error) {
-      if (error instanceof IdempotencyKeyConflict) {
-        return { kind: IDEMPOTENCY_CONFLICT, error };
+      const order = await this.insertOrderWithItems(tx, {
+        customerId: input.customerId,
+        shippingAddressId: address.id,
+        address: input.address,
+        coordinates,
+        subtotalAmount: input.subtotalAmount,
+        totalAmount: input.totalAmount,
+        currency: input.currency,
+        idempotencyKey: input.idempotencyKey,
+        pricedLineItems: input.pricedLineItems,
+      });
+      if (!order) {
+        if (input.idempotencyKey === null) {
+          throw new Error('Order insert conflicted without an idempotency key');
+        }
+        throw new IdempotencyKeyConflictError(input.idempotencyKey);
       }
-      throw error;
-    }
+
+      const reserved = await this.tryReserveOrderStock(
+        tx,
+        order,
+        input.candidates,
+        input.items,
+      );
+      if (reserved) {
+        return { order: reserved, state: OrderState.Reserved };
+      }
+
+      // Every warehouse candidate was exhausted by the race window; retain the order
+      // so the caller can report the recorded conflict.
+      return { order, state: OrderState.Created };
+    });
   }
 
   /**
@@ -125,7 +115,6 @@ export class OrderPlacementService {
       totalAmount: bigint;
       currency: string;
       idempotencyKey: string | null;
-      idempotencyRequestFingerprint: string | null;
       pricedLineItems: PricedLineItem[];
     },
   ): Promise<Order | null> {
@@ -147,7 +136,6 @@ export class OrderPlacementService {
         shippingLatitude: input.coordinates.latitude.toFixed(6),
         shippingLongitude: input.coordinates.longitude.toFixed(6),
         idempotencyKey: input.idempotencyKey,
-        idempotencyRequestFingerprint: input.idempotencyRequestFingerprint,
         state: OrderState.Created,
       })
       .onConflictDoNothing({ target: orders.idempotencyKey })

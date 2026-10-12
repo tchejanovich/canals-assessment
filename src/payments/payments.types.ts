@@ -50,9 +50,7 @@ export type OrderPaymentResult =
   | {
       status: typeof PaymentStatus.Captured;
       captureId: string;
-      capturedAt: Date | null;
-      alreadyCaptured: boolean;
+      capturedAt: Date;
     }
   | { status: typeof PaymentStatus.Declined }
-  | { status: typeof PaymentStatus.Voided }
   | { status: typeof PaymentStatus.Failed };

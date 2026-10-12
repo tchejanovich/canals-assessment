@@ -6,10 +6,9 @@
  *
  * Lifecycle: `authorizing` -> `authorized` -> `captured` is the happy path;
  * `voided` releases a hold taken by an authorization that is not (or cannot be)
- * captured. Each transition is a guarded update so the flow is safe to resume
- * after a crash: the provider's own idempotency keys mean a retried
- * authorize/capture returns the original result, and this column records how
- * far the last attempt got.
+ * captured. The persisted status records how far payment processing got, and
+ * provider idempotency keys protect repeated individual provider calls. A
+ * duplicate `POST /orders` does not resume a payment for a committed order.
  *
  * - `authorizing` — a hold is being placed; the provider response has not been
  *   recorded yet (or the process crashed before it was).

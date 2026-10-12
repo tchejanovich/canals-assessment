@@ -66,20 +66,13 @@ export function toOrderResponse(
   };
 }
 
-/**
- * Builds the full create-order result `{ order, created: true }` for a freshly
- * finalized order, so the service returns a single mapped value instead of
- * assembling the response hash itself.
- */
-export function toCreatedOrderResult(
+/** Maps a finalized order using the line prices computed during creation. */
+export function toOrderResponseFromPricedLineItems(
   order: Order,
   pricedLineItems: PricedLineItem[],
-): { order: OrderResponse; created: boolean } {
-  return {
-    order: toOrderResponse(
-      order,
-      pricedLineItems.map(toOrderItemFromPricedLineItem),
-    ),
-    created: true,
-  };
+): OrderResponse {
+  return toOrderResponse(
+    order,
+    pricedLineItems.map(toOrderItemFromPricedLineItem),
+  );
 }
