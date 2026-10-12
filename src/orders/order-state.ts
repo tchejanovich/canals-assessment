@@ -7,17 +7,18 @@
  * Lifecycle: `created` -> `reserved` -> `active` is the happy path;
  * `cancelled` is the compensation when the payment capture fails after stock
  * was reserved. Each transition is a guarded `UPDATE ... WHERE state = <old>`
- * so an order can only move from its expected prior state.
+ * so an order can only move one step at a time, which is what makes replays
+ * and crash recovery safe.
  *
  * - `created`  — header and lines persisted, nothing reserved yet (either
  *   still walking the nearest-first warehouse list, or every candidate was
  *   exhausted by the race window). A `created` order is the recorded trace of
- *   a lost race; it is reported in the 409 and its supplied key stays bound.
+ *   a lost race; it is reported in the 409 and its key stays bound.
  * - `reserved` — stock has been decremented at a specific warehouse and the
  *   warehouse is assigned; awaiting the payment lifecycle (authorize/capture),
- *   which runs outside any transaction. A crash in this state leaves a recorded
- *   incomplete order; reusing its key conflicts rather than resuming payment.
- *   Provider idempotency keys still protect individual provider operations.
+ *   which runs outside any transaction. A crash in this state is recoverable: a
+ *   replay of the key resumes the payment from its recorded status, and the
+ *   order-scoped provider idempotency keys prevent a double charge.
  * - `active`   — payment captured; the order is fulfillable.
  * - `cancelled`— payment capture declined/failed; the reserved stock was
  *   returned to inventory atomically with this transition. Nothing was charged.

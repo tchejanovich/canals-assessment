@@ -3,9 +3,12 @@ import {
   Controller,
   Get,
   Headers,
+  HttpStatus,
   Param,
   Post,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import {
   createOrderSchema,
   type CreateOrderDto,
@@ -37,10 +40,16 @@ export class OrdersController {
   async create(
     @Body() body: unknown,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<OrderResponse> {
     try {
       const dto = this.validateBody.transform(body) as CreateOrderDto;
-      return await this.ordersService.createOrder(dto, idempotencyKey);
+      const { order, created } = await this.ordersService.createOrder(
+        dto,
+        idempotencyKey,
+      );
+      res.status(created ? HttpStatus.CREATED : HttpStatus.OK);
+      return order;
     } catch (error) {
       throw toHttpException(error);
     }

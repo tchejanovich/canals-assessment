@@ -162,13 +162,6 @@
       "when": 1791815943969,
       "tag": "0022_add_payment_authorized_at",
       "breakpoints": true
-    },
-    {
-      "idx": 23,
-      "version": "7",
-      "when": 1791835165527,
-      "tag": "0023_drop_order_idempotency_request_fingerprint",
-      "breakpoints": true
     }
   ]
 }

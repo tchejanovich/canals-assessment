@@ -17,10 +17,11 @@ import { orders } from './orders.js';
 export const paymentStatus = pgEnum('payment_status', PAYMENT_STATUSES);
 
 /**
- * Payment attempt for an order. A row is created (status `authorizing`) as soon
- * as stock is reserved and before the provider is called, recording the payment
- * attempt. Each order has at most one payment row and each provider call uses a
- * deterministic, order-scoped idempotency key to prevent duplicate effects.
+ * Payment attempt for an order. A row is claimed (status `authorizing`) as soon
+ * as stock is reserved and before the provider is called, so the flow can be
+ * resumed after a crash. Each order has at most one payment row and each
+ * provider call uses a deterministic, order-scoped idempotency key, which is
+ * what stops a retried or concurrent replay from charging twice.
  * `authorizedAt`, `capturedAt` and `voidedAt` record when the application
  * persisted each payment transition. `authorizationId` and `captureId` are the
  * provider-side ids; `last4` is the last four digits of the card. Monetary

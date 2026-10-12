@@ -70,9 +70,18 @@ export class ReservedOrderMissingWarehouseError extends Error {
   }
 }
 
-export class IdempotencyKeyConflictError extends DomainError {
+export class IdempotencyKeyReusedError extends DomainError {
   constructor(readonly key: string) {
-    super(`Idempotency key ${key} has already been used`);
+    super(`Idempotency key ${key} was already used with a different payload`);
+  }
+}
+
+export class OrderPaymentDeclinedError extends DomainError {
+  constructor(readonly orderId: number) {
+    super(
+      `Order ${orderId} had its payment declined; it is recorded as '${OrderState.Cancelled}' ` +
+        `and any reserved stock was returned. Retry with a new idempotency key to attempt it again`,
+    );
   }
 }
 

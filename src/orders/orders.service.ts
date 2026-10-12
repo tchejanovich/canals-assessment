@@ -5,29 +5,41 @@ import { CustomersService } from '../customers/customers.service.js';
 import { DATABASE, type Database } from '../db/database.module.js';
 import {
   orderItems,
+  type Order,
   orders,
   type Product,
 } from '../db/schema/index.js';
 import { ProductsService } from '../products/products.service.js';
 import { WarehousesService } from '../warehouses/warehouses.service.js';
 import type { CreateOrderDto } from './dto/create-order.dto.js';
-import type { OrderResponse } from './dto/order-response.dto.js';
+import type {
+  OrderItemResponse,
+  OrderResponse,
+} from './dto/order-response.dto.js';
 import {
   CustomerNotFoundError,
-  IdempotencyKeyConflictError,
   MixedCurrencyError,
   NoFulfillingWarehouseError,
   OrderNotFoundError,
+  OrderPaymentDeclinedError,
   ProductNotFoundError,
   ProductUnavailableError,
   UnfulfilledOrderError,
 } from './orders.errors.js';
-import { OrderFinalizationService } from './order-finalization.service.js';
-import { OrderPlacementService } from './order-placement.service.js';
 import {
+  assertReplayMatchesPayload,
+  computeIdempotencyRequestFingerprint,
+  IDEMPOTENCY_CONFLICT,
+} from './orders.idempotency.js';
+import { OrderFinalizationService } from './order-finalization.service.js';
+import {
+  IdempotencyKeyConflict,
+  OrderPlacementService,
+} from './order-placement.service.js';
+import {
+  toCreatedOrderResult,
   toOrderItem,
   toOrderResponse,
-  toOrderResponseFromPricedLineItems,
 } from './orders.mapper.js';
 import {
   buildPricedLineItems,
@@ -81,9 +93,12 @@ export class OrdersService {
   async createOrder(
     dto: CreateOrderDto,
     idempotencyKey?: string,
-  ): Promise<OrderResponse> {
-    if (idempotencyKey !== undefined) {
-      await this.assertIdempotencyKeyUnused(idempotencyKey);
+  ): Promise<{ order: OrderResponse; created: boolean }> {
+    const replayed = idempotencyKey
+      ? await this.resolveIdempotentReplay(idempotencyKey, dto)
+      : null;
+    if (replayed) {
+      return { order: replayed, created: false };
     }
 
     const customer = await this.customers.findById(dto.customerId);
@@ -122,6 +137,9 @@ export class OrdersService {
     }
 
     const totalAmount = subtotalAmount;
+    const requestFingerprint = idempotencyKey
+      ? computeIdempotencyRequestFingerprint(dto)
+      : null;
 
     const outcome = await this.placement.placeOrder({
       customerId: dto.customerId,
@@ -135,8 +153,20 @@ export class OrdersService {
       totalAmount,
       currency,
       idempotencyKey: idempotencyKey ?? null,
+      idempotencyRequestFingerprint: requestFingerprint,
       pricedLineItems,
     });
+
+    if (outcome.kind === IDEMPOTENCY_CONFLICT) {
+      if (!idempotencyKey) {
+        throw outcome.error;
+      }
+      return this.resolveIdempotencyKeyConflict(
+        idempotencyKey,
+        dto,
+        outcome.error,
+      );
+    }
 
     if (outcome.state === OrderState.Created) {
       throw new UnfulfilledOrderError(outcome.order.id);
@@ -146,17 +176,7 @@ export class OrdersService {
       outcome.order,
       dto,
     );
-    return toOrderResponseFromPricedLineItems(finalized, pricedLineItems);
-  }
-
-  private async assertIdempotencyKeyUnused(key: string): Promise<void> {
-    const [existing] = await this.db
-      .select({ id: orders.id })
-      .from(orders)
-      .where(eq(orders.idempotencyKey, key))
-      .limit(1);
-
-    if (existing) throw new IdempotencyKeyConflictError(key);
+    return toCreatedOrderResult(finalized, pricedLineItems);
   }
 
   private async resolveProductMap(
@@ -182,4 +202,101 @@ export class OrdersService {
     return productById;
   }
 
+  private async findIdempotentOrder(key: string): Promise<{
+    order: Order;
+    items: OrderItemResponse[];
+    requestFingerprint: string | null;
+  } | null> {
+    const rows = await this.db
+      .select({ order: orders, item: orderItems })
+      .from(orders)
+      .innerJoin(orderItems, eq(orderItems.orderId, orders.id))
+      .where(eq(orders.idempotencyKey, key));
+
+    if (rows.length === 0) {
+      return null;
+    }
+
+    const { order } = rows[0];
+    return {
+      order,
+      requestFingerprint: order.idempotencyRequestFingerprint,
+      items: rows.map((row) => toOrderItem(row.item)),
+    };
+  }
+
+  /**
+   * Resolves what an idempotency-key replay should answer, or `null` when the
+   * key has never been seen and a new order should be created:
+   *
+   * - no stored order             -> `null`
+   * - stored order is `active`    -> the stored order (no duplicate created)
+   * - stored order is `reserved`  -> the original request reserved the stock
+   *                                  but never finished the payment, or
+   *                                  crashed doing so. The replay RESUMES it
+   *                                  from the recorded payment status; the
+   *                                  provider calls are keyed by the order, so
+   *                                  re-running them cannot charge twice.
+   * - stored order is `cancelled` -> the payment was declined or its capture
+   *                                  failed and the key stays bound to that
+   *                                  failed outcome.
+   * - stored order is `created`   -> a recorded race loss; throws the recorded
+   *                                  conflict, key stays bound.
+   *
+   * A replay whose payload differs from the stored request is always a conflict
+   * — the stored order is never silently returned for a request it does not
+   * match.
+   */
+  private async resolveIdempotentReplay(
+    idempotencyKey: string,
+    dto: CreateOrderDto,
+  ): Promise<OrderResponse | null> {
+    const existing = await this.findIdempotentOrder(idempotencyKey);
+    if (!existing) {
+      return null;
+    }
+
+    assertReplayMatchesPayload(
+      existing.requestFingerprint,
+      dto,
+      idempotencyKey,
+    );
+
+    this.logger.log(
+      `Idempotency key ${idempotencyKey} replay -> order ${existing.order.id} (state ${existing.order.state})`,
+    );
+
+    switch (existing.order.state) {
+      case OrderState.Active:
+        return toOrderResponse(existing.order, existing.items);
+      case OrderState.Reserved: {
+        const finalized = await this.finalization.finalizeReservedOrder(
+          existing.order,
+          dto,
+        );
+        return toOrderResponse(finalized, existing.items);
+      }
+      case OrderState.Cancelled:
+        throw new OrderPaymentDeclinedError(existing.order.id);
+      default:
+        throw new UnfulfilledOrderError(existing.order.id);
+    }
+  }
+
+  private async resolveIdempotencyKeyConflict(
+    idempotencyKey: string,
+    dto: CreateOrderDto,
+    conflict: IdempotencyKeyConflict,
+  ): Promise<{ order: OrderResponse; created: false }> {
+    // The transaction rolled back; attach to the committed winner instead.
+    const replayed = await this.resolveIdempotentReplay(idempotencyKey, dto);
+    if (!replayed) {
+      throw conflict;
+    }
+
+    this.logger.log(
+      `Idempotency key ${idempotencyKey} raced; attached to existing order ${replayed.id}`,
+    );
+    return { order: replayed, created: false };
+  }
 }

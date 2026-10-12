@@ -40,9 +40,9 @@ interface AuthorizationRecord {
  *
  * Every call is idempotent on its key: a repeated key replays the stored
  * result, and concurrent calls sharing a key await the same in-flight call
- * rather than reaching the provider twice. This protects provider operations
- * if an individual authorize/capture/void call is retried. The order endpoint
- * itself rejects a committed duplicate order key rather than resuming it.
+ * rather than reaching the provider twice. That idempotency — not the database
+ * — is what makes the order flow safe to resume after a crash, because the
+ * caller may retry an authorize/capture it never saw the response to.
  */
 @Injectable()
 export class PaymentsApi {
