@@ -32,10 +32,7 @@ import {
   IDEMPOTENCY_CONFLICT,
 } from './orders.idempotency.js';
 import { OrderFinalizationService } from './order-finalization.service.js';
-import {
-  IdempotencyKeyConflict,
-  OrderPlacementService,
-} from './order-placement.service.js';
+import { OrderPlacementService } from './order-placement.service.js';
 import {
   toCreatedOrderResult,
   toOrderItem,
@@ -47,6 +44,7 @@ import {
   resolveCurrency,
 } from './orders.pricing.js';
 import { OrderState } from './order-state.js';
+import { IdempotencyKeyConflict } from './orders.types.js';
 
 /**
  * How many nearest-first warehouses are tried before giving up. Candidates

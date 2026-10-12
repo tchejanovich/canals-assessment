@@ -18,7 +18,11 @@ import type {
 import { IDEMPOTENCY_CONFLICT } from './orders.idempotency.js';
 import { OrderVanishedError } from './orders.errors.js';
 import { OrderState } from './order-state.js';
-import type { PricedLineItem } from './orders.types.js';
+import {
+  IdempotencyKeyConflict,
+  type OrderPlacementResult,
+  type PricedLineItem,
+} from './orders.types.js';
 
 export interface PlaceOrderInput {
   customerId: number;
@@ -33,17 +37,6 @@ export interface PlaceOrderInput {
   idempotencyKey: string | null;
   idempotencyRequestFingerprint: string | null;
   pricedLineItems: PricedLineItem[];
-}
-
-export type OrderPlacementResult =
-  | { kind: 'placed'; order: Order; state: OrderState }
-  | { kind: typeof IDEMPOTENCY_CONFLICT; error: IdempotencyKeyConflict };
-
-export class IdempotencyKeyConflict extends Error {
-  constructor() {
-    super('Order already exists for this idempotency key');
-    this.name = new.target.name;
-  }
 }
 
 @Injectable()
