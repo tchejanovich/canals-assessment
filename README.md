@@ -94,12 +94,16 @@ table:
   unique index means the same address reuses its stored coordinates rather than
   being geocoded again on subsequent orders, even across customers. Simultaneous
   first requests for an address may both geocode before one address row wins.
-- They are mutable — a customer can edit them — so they're kept as independent
-  records rather than copied inline.
 
-Because orders snapshot the chosen shipping address at purchase time, later edits
-to a customer's `addresses` row (or an update to a warehouse's inline address) do
-not rewrite historical order data.
+The current API does not let customers modify address records, so the
+`shipping_address_id` reference alone would currently be sufficient. Orders also
+copy the chosen shipping address into the order row, a common practice because an
+order is a historical transaction: its destination should reflect what was
+submitted at purchase time, not whatever a reusable address record contains
+later. If address modification is added, this snapshot will ensure that editing
+an address does not change the displayed or fulfilled destination of an existing
+order. It also keeps the order's address details available as part of the order
+record for fulfillment, support, and audit workflows.
 
 **Nearest-warehouse selection uses PostGIS**
 
