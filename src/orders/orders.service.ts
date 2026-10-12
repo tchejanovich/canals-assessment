@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { asc, eq } from 'drizzle-orm';
 import { AddressesService } from '../addresses/addresses.service.js';
+import type { Coordinates } from '../common/geo.js';
 import { CustomersService } from '../customers/customers.service.js';
 import { DATABASE, type Database } from '../db/database.module.js';
 import {
@@ -10,7 +11,10 @@ import {
   type Product,
 } from '../db/schema/index.js';
 import { ProductsService } from '../products/products.service.js';
-import { WarehousesService } from '../warehouses/warehouses.service.js';
+import {
+  WarehousesService,
+  type WarehouseWithDistance,
+} from '../warehouses/warehouses.service.js';
 import type { CreateOrderDto } from './dto/create-order.dto.js';
 import type {
   OrderItemResponse,
@@ -18,6 +22,7 @@ import type {
 } from './dto/order-response.dto.js';
 import {
   CustomerNotFoundError,
+  IdempotencyKeyConflict,
   MixedCurrencyError,
   NoFulfillingWarehouseError,
   OrderNotFoundError,
@@ -44,7 +49,7 @@ import {
   resolveCurrency,
 } from './orders.pricing.js';
 import { OrderState } from './order-state.js';
-import { IdempotencyKeyConflict } from './orders.types.js';
+import type { PricedLineItem } from './orders.types.js';
 
 /**
  * How many nearest-first warehouses are tried before giving up. Candidates
@@ -54,6 +59,16 @@ import { IdempotencyKeyConflict } from './orders.types.js';
  * attempted.
  */
 const WAREHOUSE_FALLBACK_ATTEMPTS = 5;
+
+interface PreparedOrder {
+  pricedLineItems: PricedLineItem[];
+  totalAmount: bigint;
+  currency: string;
+  countryId: number;
+  regionId: number;
+  coordinates: Coordinates;
+  candidates: WarehouseWithDistance[];
+}
 
 @Injectable()
 export class OrdersService {
@@ -99,40 +114,7 @@ export class OrdersService {
       return { order: replayed, created: false };
     }
 
-    const customer = await this.customers.findById(dto.customerId);
-    if (!customer) {
-      throw new CustomerNotFoundError(dto.customerId);
-    }
-
-    const productById = await this.resolveProducts(dto);
-
-    const pricedLineItems = buildPricedLineItems(dto, productById);
-    const totalAmount = calculateTotal(pricedLineItems);
-
-    const currency = resolveCurrency(pricedLineItems);
-    if (currency === null) {
-      throw new MixedCurrencyError();
-    }
-
-    const countryId = await this.addresses.resolveCountry(dto.address.country);
-    const regionId = await this.addresses.resolveRegion(
-      countryId,
-      dto.address.region,
-    );
-
-    const coordinates = await this.addresses.resolveCoordinates(dto.address);
-
-    const warehouseCandidates = await this.warehouses.findFulfillingWarehouses(
-      dto.items,
-      coordinates,
-      WAREHOUSE_FALLBACK_ATTEMPTS,
-    );
-    if (warehouseCandidates.length === 0) {
-      this.logger.warn(
-        `No single warehouse can fulfil customer ${dto.customerId}'s ${dto.items.length} item(s)`,
-      );
-      throw new NoFulfillingWarehouseError();
-    }
+    const preparedOrder = await this.prepareOrder(dto);
 
     const requestFingerprint = idempotencyKey
       ? computeIdempotencyRequestFingerprint(dto)
@@ -141,16 +123,16 @@ export class OrdersService {
     const outcome = await this.placement.placeOrder({
       customerId: dto.customerId,
       address: dto.address,
-      countryId,
-      regionId,
-      coordinates,
-      candidates: warehouseCandidates,
+      countryId: preparedOrder.countryId,
+      regionId: preparedOrder.regionId,
+      coordinates: preparedOrder.coordinates,
+      candidates: preparedOrder.candidates,
       items: dto.items,
-      totalAmount,
-      currency,
+      totalAmount: preparedOrder.totalAmount,
+      currency: preparedOrder.currency,
       idempotencyKey: idempotencyKey ?? null,
       idempotencyRequestFingerprint: requestFingerprint,
-      pricedLineItems,
+      pricedLineItems: preparedOrder.pricedLineItems,
     });
 
     if (outcome.kind === IDEMPOTENCY_CONFLICT) {
@@ -172,7 +154,51 @@ export class OrdersService {
       outcome.order,
       dto,
     );
-    return toCreatedOrderResult(finalized, pricedLineItems);
+    return toCreatedOrderResult(finalized, preparedOrder.pricedLineItems);
+  }
+
+  private async prepareOrder(dto: CreateOrderDto): Promise<PreparedOrder> {
+    const customer = await this.customers.findById(dto.customerId);
+    if (!customer) {
+      throw new CustomerNotFoundError(dto.customerId);
+    }
+
+    const productById = await this.resolveProducts(dto);
+    const pricedLineItems = buildPricedLineItems(dto, productById);
+    const totalAmount = calculateTotal(pricedLineItems);
+
+    const currency = resolveCurrency(pricedLineItems);
+    if (currency === null) {
+      throw new MixedCurrencyError();
+    }
+
+    const countryId = await this.addresses.resolveCountry(dto.address.country);
+    const regionId = await this.addresses.resolveRegion(
+      countryId,
+      dto.address.region,
+    );
+    const coordinates = await this.addresses.resolveCoordinates(dto.address);
+    const candidates = await this.warehouses.findFulfillingWarehouses(
+      dto.items,
+      coordinates,
+      WAREHOUSE_FALLBACK_ATTEMPTS,
+    );
+    if (candidates.length === 0) {
+      this.logger.warn(
+        `No single warehouse can fulfil customer ${dto.customerId}'s ${dto.items.length} item(s)`,
+      );
+      throw new NoFulfillingWarehouseError();
+    }
+
+    return {
+      pricedLineItems,
+      totalAmount,
+      currency,
+      countryId,
+      regionId,
+      coordinates,
+      candidates,
+    };
   }
 
   private async resolveProducts(

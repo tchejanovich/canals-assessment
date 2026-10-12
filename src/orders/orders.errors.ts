@@ -76,6 +76,14 @@ export class IdempotencyKeyReusedError extends DomainError {
   }
 }
 
+/** Internal signal used to roll back a placement transaction on a key race. */
+export class IdempotencyKeyConflict extends Error {
+  constructor() {
+    super('Order already exists for this idempotency key');
+    this.name = new.target.name;
+  }
+}
+
 export class OrderPaymentDeclinedError extends DomainError {
   constructor(readonly orderId: number) {
     super(

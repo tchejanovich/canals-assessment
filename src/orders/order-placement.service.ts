@@ -16,13 +16,9 @@ import type {
   CreateOrderItem,
 } from './dto/create-order.dto.js';
 import { IDEMPOTENCY_CONFLICT } from './orders.idempotency.js';
-import { OrderVanishedError } from './orders.errors.js';
+import { IdempotencyKeyConflict, OrderVanishedError } from './orders.errors.js';
 import { OrderState } from './order-state.js';
-import {
-  IdempotencyKeyConflict,
-  type OrderPlacementResult,
-  type PricedLineItem,
-} from './orders.types.js';
+import type { OrderPlacementResult, PricedLineItem } from './orders.types.js';
 
 export interface PlaceOrderInput {
   customerId: number;
