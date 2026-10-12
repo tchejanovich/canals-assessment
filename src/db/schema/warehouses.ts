@@ -22,17 +22,9 @@ const geographyPoint = customType<{ data: string }>({
   },
 });
 
-/**
- * A fulfilment location. Orders are always fulfilled from a single warehouse,
- * so coordinates are stored for the nearest-warehouse calculation. The address
- * is an intrinsic, single (1:1) attribute of the facility, so it is embedded
- * here rather than shared with the customer-oriented `addresses` table.
- * `countryId` and `regionId` reference the country/region reference tables.
- *
- * `latitude`/`longitude` remain the source of truth (writable, portable).
- * `location` is a derived, read-only shadow of those two columns that exists
- * solely so a GiST index can serve nearest-neighbour (`<->`) queries; it is
- * rebuilt automatically by Postgres whenever either coordinate changes.
+/** A fulfillment location with an embedded address and nearest-search coordinates.
+ * `latitude`/`longitude` are writable; Postgres derives the indexed geography
+ * column `location` from them. Country and region are reference-table IDs.
  */
 export const warehouses = pgTable(
   'warehouses',

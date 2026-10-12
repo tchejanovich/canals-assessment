@@ -9,10 +9,7 @@ import {
 } from 'drizzle-orm/pg-core';
 import { countries } from './countries.js';
 
-/**
- * First-level administrative region (e.g. US state). Codes are unique within a
- * country. Seeded via migration; for now only US states (and DC) are present.
- */
+/** First-level regions (such as US states), with codes unique per country. */
 export const regions = pgTable(
   'regions',
   {

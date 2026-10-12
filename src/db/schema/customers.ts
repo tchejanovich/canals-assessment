@@ -1,9 +1,6 @@
 import { bigint, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 
-/**
- * A customer that can place orders. There is intentionally no management API
- * for this table in the assessment; rows are seeded.
- */
+/** Customers who can place orders; rows are seeded for this assessment. */
 export const customers = pgTable(
   'customers',
   {

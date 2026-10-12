@@ -5,10 +5,7 @@ export interface ValidationIssue {
   message: string;
 }
 
-/**
- * A request body that failed schema validation. Carries the individual issues
- * so the controller can surface them alongside the mapped 400.
- */
+/** Schema validation error carrying the issues returned to the client. */
 export class ValidationError extends DomainError {
   constructor(readonly issues: ValidationIssue[]) {
     super('Validation failed');

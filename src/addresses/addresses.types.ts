@@ -1,6 +1,6 @@
 import type { Coordinates } from '../common/geo.js';
 
-/** The textual parts of an address that determine its identity. */
+/** Text fields used to identify an address. */
 export interface AddressParts {
   line1: string;
   line2?: string | null;
@@ -10,11 +10,7 @@ export interface AddressParts {
   country: string;
 }
 
-/**
- * Everything needed to persist an address: the raw parts (which determine the
- * deduplicating fingerprint), the already-resolved country/region ids and the
- * geocoded coordinates.
- */
+/** Raw address, resolved reference IDs, and geocoded coordinates for persistence. */
 export interface StoreAddressInput {
   customerId: number;
   address: AddressParts;

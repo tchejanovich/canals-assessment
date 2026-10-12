@@ -23,11 +23,7 @@ import {
   UnfulfilledOrderError,
 } from './orders.errors.js';
 
-/**
- * Every business rule has its own domain error; this table is the single place
- * that decides which HTTP status each one maps to. Kept at the controller edge
- * so the domain and service layers never reference HTTP semantics.
- */
+/** Maps domain errors to HTTP statuses at the controller boundary. */
 const STATUS_BY_ERROR = new Map<Function, HttpStatus>([
   [ValidationError, HttpStatus.BAD_REQUEST],
   [ProductUnavailableError, HttpStatus.BAD_REQUEST],
@@ -48,13 +44,7 @@ const STATUS_BY_ERROR = new Map<Function, HttpStatus>([
   [NoFulfillingWarehouseError, HttpStatus.UNPROCESSABLE_ENTITY],
 ]);
 
-/**
- * Translates a domain error into an HTTP exception with a single response
- * envelope shared by every business error, so clients parse one shape:
- * `{ statusCode, error, message, errors? }`. Field-level `errors` are only
- * present for a failed schema validation. Non-domain errors (bugs, database
- * failures) are re-thrown untouched so they surface as 500s.
- */
+/** Maps domain errors to a consistent response; unexpected errors pass through as 500s. */
 export function toHttpException(error: unknown): HttpException {
   if (!(error instanceof DomainError)) {
     throw error;

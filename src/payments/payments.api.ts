@@ -12,24 +12,9 @@ import type {
   VoidResult,
 } from './payments.api.types.js';
 
-/**
- * In-memory stand-in for a card processor. A real provider exposes three calls
- * that each take an idempotency key and persist their own result; we mirror
- * that shape so the order flow can be exercised end to end:
- *
- * - `authorize` places a hold for `amount` on the card — the funds are
- *   reserved but not moved. A card whose digits end in `0000`, or a
- *   non-positive amount, is declined.
- * - `capture` moves a previously authorized amount and returns a capture id.
- *   It fails if the authorization is unknown or has been voided; capturing an
- *   already-captured authorization replays the original capture id.
- * - `void` releases an authorization that was never captured.
- *
- * Every call is idempotent on its key: a repeated key replays the stored
- * result, and concurrent calls sharing a key await the same in-flight call
- * rather than reaching the provider twice. That idempotency — not the database
- * — is what makes the order flow safe to resume after a crash, because the
- * caller may retry an authorize/capture it never saw the response to.
+/** In-memory card-processor mock. Authorization holds funds, capture charges,
+ * and void releases the hold. Results are cached by idempotency key, including
+ * concurrent calls; repeated captures reuse the same ID.
  */
 @Injectable()
 export class PaymentsApi {

@@ -13,10 +13,7 @@ import {
 import { orders } from './orders.js';
 import { products } from './products.js';
 
-/**
- * Immutable order line item. Product name, sku and unit price are snapshotted
- * at order time so later catalog changes cannot alter historical orders.
- */
+/** Order-time snapshot of product name, SKU, price, quantity, and line total. */
 export const orderItems = pgTable(
   'order_items',
   {

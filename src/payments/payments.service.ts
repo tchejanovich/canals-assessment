@@ -201,14 +201,14 @@ export class PaymentsService {
       return { status: PaymentStatus.Authorized };
     }
 
-    // Another attempt won the guarded update, so reconcile against its stored payment state.
+    // Another attempt changed the row; reconcile its persisted state.
     return this.reconcileAuthorizationFromStoredPayment(
       payment.id,
       authorization,
     );
   }
 
-  /** Resolve a lost guarded authorization update against the winning row. */
+  /** Reconcile a lost authorization update with the stored payment row. */
   private async reconcileAuthorizationFromStoredPayment(
     paymentId: number,
     authorization: { authorizationId: string; last4: string },
@@ -219,19 +219,19 @@ export class PaymentsService {
       .where(eq(payments.id, paymentId))
       .limit(1);
 
-    // A missing row leaves no payment state to reconcile.
+    // No row remains to reconcile.
     if (!current) {
       throw new Error(`Payment ${paymentId} disappeared after authorization`);
     }
 
-    // A concurrent attempt may already have persisted the next payment state.
+    // Another attempt may have already advanced the payment.
     const claim = this.authorizationClaimFromPayment(current);
     if (claim) return claim;
 
-    // If still authorizing, persist this provider response before capture.
+    // If still authorizing, persist this response before capture.
     if (current.status === PaymentStatus.Authorizing) {
       const updated = await this.persistAuthorization(paymentId, authorization);
-      // This attempt successfully recorded the provider's authorization.
+      // This attempt persisted the authorization.
       if (updated?.authorizationId) {
         return { status: PaymentStatus.Authorized };
       }
@@ -242,13 +242,13 @@ export class PaymentsService {
         .where(eq(payments.id, paymentId))
         .limit(1);
 
-      // If another request changed the row first, use its latest persisted state.
+      // Another request may have changed the row; use its latest state.
       const latestClaim =
         current && this.authorizationClaimFromPayment(current);
       if (latestClaim) return latestClaim;
     }
 
-    // Do not capture unless an authorization ID has been durably recorded.
+    // Capture only after the authorization ID is stored.
     throw new Error(
       `Payment ${paymentId} authorization could not be persisted before capture`,
     );

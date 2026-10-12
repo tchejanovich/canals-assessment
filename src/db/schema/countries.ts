@@ -7,10 +7,7 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
-/**
- * ISO-3166-1 country reference data. Seeded via migration; for now only the
- * United States is present.
- */
+/** ISO-3166-1 country reference data, seeded by migration. */
 export const countries = pgTable(
   'countries',
   {

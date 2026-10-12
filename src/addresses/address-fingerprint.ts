@@ -30,10 +30,7 @@ export function serializeCanonicalAddress(address: AddressParts): string {
   return JSON.stringify(normalizeAddressParts(address));
 }
 
-/**
- * Unambiguous identity of an address. JSON encoding preserves field boundaries
- * even when a field contains punctuation such as `|`.
- */
+/** JSON array encoding preserves address field boundaries. */
 export function buildAddressFingerprint(address: AddressParts): string {
   return serializeCanonicalAddress(address);
 }

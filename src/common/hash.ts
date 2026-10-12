@@ -1,7 +1,4 @@
-/**
- * FNV-1a 32-bit hash. Deterministic and dependency-free, used to derive stable
- * pseudo-random values from strings (e.g. the mocked geocoding coordinates).
- */
+/** Deterministic, dependency-free FNV-1a 32-bit hash. */
 export function fnv1aHash(value: string): number {
   let hash = 2166136261;
   for (let i = 0; i < value.length; i += 1) {

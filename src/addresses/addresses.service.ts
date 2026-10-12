@@ -67,16 +67,8 @@ export class AddressesService {
       : null;
   }
 
-  /**
-   * Idempotently persists the address and returns it. The `addresses` table is
-   * deduplicated by fingerprint, so this inserts on first sight and otherwise
-   * returns the existing row. The `onConflictDoNothing` + re-select handles the
-   * concurrent case where another transaction inserted the same fingerprint
-   * between our two statements (the insert blocks on the loser's row lock, then
-   * yields nothing, and the re-select reads the committed row).
-   *
-   * Runs inside the caller's transaction so the address is committed atomically
-   * with whatever references it (e.g. the order header).
+  /** Inserts on first use or returns the fingerprint match. Re-selects after a
+   * concurrent insert; the caller's transaction keeps address and order atomic.
    */
   async findOrCreate(
     tx: DatabaseTransaction,
@@ -170,9 +162,7 @@ export class AddressesService {
     return address as AddressWithCoordinates;
   }
 
-  /**
-   * Resolves an ISO country code to its stored id, rejecting unknown codes.
-   */
+  /** Finds a country by ISO code, or throws if it is unknown. */
   async resolveCountry(countryCode: string): Promise<number> {
     const [country] = await this.db
       .select({ id: countries.id })
@@ -185,10 +175,7 @@ export class AddressesService {
     return country.id;
   }
 
-  /**
-   * Resolves a region code scoped to a country to its stored id, rejecting
-   * unknown codes.
-   */
+  /** Finds a region by country and code, or throws if it is unknown. */
   async resolveRegion(countryId: number, regionCode: string): Promise<number> {
     const [region] = await this.db
       .select({ id: regions.id })

@@ -2,10 +2,7 @@ import type { Product } from '../db/schema/index.js';
 import type { CreateOrderDto } from './dto/create-order.dto.js';
 import type { PricedLineItem } from './orders.types.js';
 
-/**
- * Pure pricing helpers: turn the requested items into priced lines, total them
- * and resolve the single currency they must share. No I/O and no service state.
- */
+/** Prices order lines, totals them, and checks that they share a currency. */
 export function buildPricedLineItems(
   dto: CreateOrderDto,
   productById: Map<number, Product>,

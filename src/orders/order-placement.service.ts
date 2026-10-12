@@ -83,8 +83,7 @@ export class OrderPlacementService {
           return { order: reserved, state: OrderState.Reserved };
         }
 
-        // Every warehouse candidate was exhausted by the race window; retain the order
-        // so the caller can report the recorded conflict.
+        // Keep the order to record that all candidates lost the reservation race.
         return { order, state: OrderState.Created };
       });
 
@@ -97,10 +96,7 @@ export class OrderPlacementService {
     }
   }
 
-  /**
-   * Persists the order header and its line items in the caller's transaction.
-   * Returns `null` if another request already inserted the idempotency key.
-   */
+  /** Inserts the order and its lines; returns null if the key already exists. */
   private async insertOrderWithItems(
     tx: DatabaseTransaction,
     input: {
@@ -156,10 +152,7 @@ export class OrderPlacementService {
     return order;
   }
 
-  /**
-   * Tries nearest-first warehouses. A per-candidate savepoint rolls back
-   * partial reservations, while a successful stock/order update stays atomic.
-   */
+  /** Tries warehouses nearest-first; each savepoint rolls back partial reservations. */
   private async tryReserveOrderStock(
     tx: DatabaseTransaction,
     order: Order,

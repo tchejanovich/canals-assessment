@@ -11,15 +11,9 @@ export interface WarehouseWithDistance {
   longitude: number;
 }
 
-/**
- * A warehouse ranks as a candidate only if it can fulfil *every* requested
- * item, so candidates are narrowed to warehouses carrying all requested stock
- * before being ranked by distance. Ranking happens in two steps because the
- * PostGIS nearest-neighbour (`<->`) index cannot drive an aggregation: the
- * stock filter (GROUP BY / HAVING) runs first, then the surviving set is
- * ordered by spheroid distance in a separate query. The returned list is
- * ordered nearest-first; callers walk it to fall back when a reservation
- * loses a race for stock.
+/** Filters to warehouses with every requested item, then ranks them nearest-first.
+ * Separate queries let the PostGIS GiST index serve distance ordering; callers
+ * try the next candidate if a reservation loses a stock race.
  */
 @Injectable()
 export class WarehousesService {
@@ -35,13 +29,8 @@ export class WarehousesService {
       return [];
     }
 
-    // The shipping address as a PostGIS geography point (SRID 4326 = WGS84,
-    // x/y = longitude/latitude). The `<->` operator in the ORDER BY below is
-    // served by the `warehouses_location_gist_idx` GiST index: GiST stores a
-    // bounding box per index node, so ordering by `<-> origin` walks the tree
-    // nearest-first, discarding whole branches that are already farther than
-    // the best match found, instead of measuring every warehouse. This is what
-    // lets `LIMIT` stop early rather than scan-and-sort all candidates.
+    // PostGIS points use (longitude, latitude); GiST-backed `<->` ordering lets
+    // LIMIT return nearest warehouses without sorting every candidate.
     const origin = sql`ST_SetSRID(
       ST_MakePoint(${destination.longitude}, ${destination.latitude}),
       4326

@@ -24,7 +24,7 @@ export class OrderFinalizationService {
     private readonly payments: PaymentsService,
   ) {}
 
-  /** Completes payment for a reservation, or compensates it when payment fails. */
+  /** Captures payment or cancels the order and restores stock on failure. */
   async finalizeReservedOrder(
     reservedOrder: Order,
     dto: CreateOrderDto,
@@ -81,24 +81,21 @@ export class OrderFinalizationService {
     }
   }
 
-  /**
-   * Flips a reserved order to active and records capture in one transaction.
-   * If another finalizer won, return its committed order instead.
-   */
+  /** Activates the order and records capture atomically; reloads if another finalizer won. */
   private async finishActivation(
     orderId: number,
     capture: { captureId: string; capturedAt: Date },
   ): Promise<Order> {
     const activated = await this.activateOrder(orderId, capture);
-    // Return the active row when this request wins the guarded update.
+    // Return the row this request activated.
     if (activated) return activated;
 
     const latest = await this.reloadOrder(orderId);
-    // Missing after a captured payment is an invariant failure, not a fallback case.
+    // A captured payment without an order row is an invariant failure.
     if (!latest) {
       throw new Error(`Order ${orderId} disappeared after payment capture`);
     }
-    // Another finalizer won, so return its committed row.
+    // Another finalizer won; return its committed row.
     return latest;
   }
 
@@ -134,9 +131,7 @@ export class OrderFinalizationService {
     return order ?? null;
   }
 
-  /**
-   * Cancels the reservation, restores stock, and marks payment voided atomically.
-   */
+  /** Cancels the order, restores stock, and voids payment in one transaction. */
   private async cancelOrderAndRestoreStock(
     orderId: number,
     warehouseId: number,

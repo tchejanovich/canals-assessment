@@ -53,14 +53,7 @@ export class OrderVanishedError extends DomainError {
   }
 }
 
-/**
- * Internal invariant violation, not a business rule: a `reserved` order always
- * carries the warehouse that won its stock race, so a missing warehouse means
- * the row is inconsistent (a bug or corruption). Deliberately NOT a
- * `DomainError`, so it is never mapped to a `4xx`: it propagates as a `500` and
- * is logged with a stack trace instead of being reported to the client as a
- * retryable conflict.
- */
+/** Reserved orders must have a warehouse; violations are internal 500s. */
 export class ReservedOrderMissingWarehouseError extends Error {
   constructor(readonly orderId: number) {
     super(

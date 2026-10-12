@@ -18,9 +18,7 @@ export class InventoryService {
     warehouseId: number,
     requests: StockRequest[],
   ): Promise<void> {
-    // Lock inventory rows in a globally consistent order so concurrent
-    // orders sharing products never acquire row locks in opposite order
-    // (a classic deadlock even when every single row is stock-sufficient).
+    // Lock products in a consistent order to avoid deadlocks between orders.
     const linteItems = [...requests].sort((a, b) => a.productId - b.productId);
 
     for (const linteItem of linteItems) {
@@ -45,13 +43,7 @@ export class InventoryService {
     }
   }
 
-  /**
-   * Compensating restock: returns the quantity a prior `reserve` took, used
-   * when an order is cancelled after stock was reserved (e.g. the payment
-   * capture fails after the reservation committed). Unconditional — the order
-   * that calls it owns the reservation — but it keeps the same sorted order as
-   * `reserve` so lock acquisition stays globally consistent.
-   */
+  /** Restores reserved stock after cancellation, using the same lock order as `reserve`. */
   async restore(
     tx: DatabaseTransaction,
     warehouseId: number,

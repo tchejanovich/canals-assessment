@@ -1,7 +1,4 @@
-/**
- * Last four digits of a card number. Input validation at the request boundary
- * ensures the value contains only digits.
- */
+/** Returns a card's last four digits; request validation ensures digits only. */
 export function cardLast4(creditCardNumber: string): string {
   return creditCardNumber.slice(-4);
 }

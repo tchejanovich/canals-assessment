@@ -47,13 +47,7 @@ import {
 import { OrderState } from './order-state.js';
 import type { PreparedOrder } from './orders.types.js';
 
-/**
- * How many nearest-first warehouses are tried before giving up. Candidates
- * are ordered by distance; stock is re-checked under lock at reservation
- * time, so a concurrent order can drain a warehouse between candidate
- * selection and reservation, in which case the next-nearest candidate is
- * attempted.
- */
+/** Try at most five nearest candidates; reservation rechecks stock under lock. */
 const WAREHOUSE_FALLBACK_ATTEMPTS = 5;
 
 @Injectable()
@@ -233,27 +227,8 @@ export class OrdersService {
     };
   }
 
-  /**
-   * Resolves what an idempotency-key replay should answer, or `null` when the
-   * key has never been seen and a new order should be created:
-   *
-   * - no stored order             -> `null`
-   * - stored order is `active`    -> the stored order (no duplicate created)
-   * - stored order is `reserved`  -> the original request reserved the stock
-   *                                  but never finished the payment, or
-   *                                  crashed doing so. The replay RESUMES it
-   *                                  from the recorded payment status; the
-   *                                  provider calls are keyed by the order, so
-   *                                  re-running them cannot charge twice.
-   * - stored order is `cancelled` -> the payment was declined or its capture
-   *                                  failed and the key stays bound to that
-   *                                  failed outcome.
-   * - stored order is `created`   -> a recorded race loss; throws the recorded
-   *                                  conflict, key stays bound.
-   *
-   * A replay whose payload differs from the stored request is always a conflict
-   * — the stored order is never silently returned for a request it does not
-   * match.
+  /** Replays must match the stored payload. Active orders return as-is; reserved
+   * orders resume payment; created/cancelled orders return their recorded errors.
    */
   private async resolveIdempotentReplay(
     idempotencyKey: string,

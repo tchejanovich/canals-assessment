@@ -11,13 +11,8 @@ import {
 import { products } from './products.js';
 import { warehouses } from './warehouses.js';
 
-/**
- * Physical on-hand stock of a single product at a single warehouse. Stock is
- * decremented atomically on order confirmation
- * (`UPDATE ... WHERE quantity >= ?`) so concurrent orders cannot oversell.
- * Because it is volatile, inventory lives in its own table rather than on
- * `products`; movements that change it belong in a ledger if auditing is
- * later required.
+/** On-hand quantity per product and warehouse. Conditional atomic updates prevent
+ * overselling; a separate movement ledger can be added if stock history is needed.
  */
 export const inventory = pgTable(
   'inventory',
