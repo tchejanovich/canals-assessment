@@ -1,128 +1,296 @@
-import { Injectable } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
+import { Inject, Injectable } from '@nestjs/common';
+import { and, eq, ne } from 'drizzle-orm';
+import {
+  DATABASE,
+  type Database,
+  type DatabaseTransaction,
+} from '../db/database.module.js';
+import { payments, type Payment } from '../db/schema/index.js';
 import { cardLast4 } from './card.js';
+import {
+  authorizationIdempotencyKey,
+  captureIdempotencyKey,
+  voidIdempotencyKey,
+} from './payments.idempotency.js';
+import { PaymentStatus } from './payment-status.js';
+import { PaymentsApi } from './payments.api.js';
 import type {
-  AuthorizeInput,
-  AuthorizeResult,
-  CaptureInput,
-  CaptureResult,
-  VoidInput,
-  VoidResult,
+  ProcessOrderPaymentInput,
+  OrderPaymentResult,
 } from './payments.types.js';
 
-interface AuthorizationRecord {
-  amount: bigint;
-  last4: string;
-  status: 'authorized' | 'captured' | 'voided';
-  captureId: string | null;
-}
+type AuthorizationClaim =
+  | { status: typeof PaymentStatus.Authorized }
+  | {
+      status: typeof PaymentStatus.Captured;
+      captureId: string;
+      capturedAt: Date | null;
+    }
+  | { status: typeof PaymentStatus.Declined }
+  | { status: typeof PaymentStatus.Voided };
 
-/**
- * In-memory stand-in for a card processor. A real provider exposes three calls
- * that each take an idempotency key and persist their own result; we mirror
- * that shape so the order flow can be exercised end to end:
- *
- * - `authorize` places a hold for `amount` on the card — the funds are
- *   reserved but not moved. A card whose digits end in `0000`, or a
- *   non-positive amount, is declined.
- * - `capture` moves a previously authorized amount and returns a capture id.
- *   It fails if the authorization is unknown or has been voided; capturing an
- *   already-captured authorization replays the original capture id.
- * - `void` releases an authorization that was never captured.
- *
- * Every call is idempotent on its key: a repeated key replays the stored
- * result, and concurrent calls sharing a key await the same in-flight call
- * rather than reaching the provider twice. That idempotency — not the database
- * — is what makes the order flow safe to resume after a crash, because the
- * caller may retry an authorize/capture it never saw the response to.
- */
+/** Coordinates persisted payment state with the mocked/provider Payments API. */
 @Injectable()
 export class PaymentsService {
-  private readonly results = new Map<string, unknown>();
-  private readonly inFlight = new Map<string, Promise<unknown>>();
-  private readonly authorizations = new Map<string, AuthorizationRecord>();
+  constructor(
+    @Inject(DATABASE) private readonly db: Database,
+    private readonly api: PaymentsApi,
+  ) {}
 
-  async authorize(input: AuthorizeInput): Promise<AuthorizeResult> {
-    return this.idempotent(input.idempotencyKey, () => {
-      const last4 = cardLast4(input.creditCardNumber);
-      const digits = input.creditCardNumber.replace(/\D/g, '');
-      const approved = !digits.endsWith('0000') && input.amount > 0n;
+  /** Run or resume authorization and capture for an order payment. */
+  async processOrderPayment(
+    input: ProcessOrderPaymentInput,
+  ): Promise<OrderPaymentResult> {
+    const payment = await this.claimPayment(input);
 
-      if (!approved) {
-        return { status: 'declined', authorizationId: null, last4 } as const;
-      }
-
-      const authorizationId = randomUUID();
-      this.authorizations.set(authorizationId, {
-        amount: input.amount,
-        last4,
-        status: 'authorized',
-        captureId: null,
-      });
-
-      return { status: 'authorized', authorizationId, last4 } as const;
-    });
-  }
-
-  async capture(input: CaptureInput): Promise<CaptureResult> {
-    return this.idempotent(input.idempotencyKey, () => {
-      const authorization = this.authorizations.get(input.authorizationId);
-      if (!authorization || authorization.status === 'voided') {
-        return { status: 'failed', captureId: null } as const;
-      }
-
-      if (authorization.status === 'captured') {
-        return {
-          status: 'captured',
-          captureId: authorization.captureId!,
-        } as const;
-      }
-
-      authorization.status = 'captured';
-      authorization.captureId = randomUUID();
+    if (payment.status === PaymentStatus.Captured && payment.captureId) {
       return {
-        status: 'captured',
-        captureId: authorization.captureId,
-      } as const;
-    });
-  }
-
-  async void(input: VoidInput): Promise<VoidResult> {
-    return this.idempotent(input.idempotencyKey, () => {
-      const authorization = this.authorizations.get(input.authorizationId);
-      if (!authorization || authorization.status === 'voided') {
-        return { status: 'voided' } as const;
-      }
-
-      if (authorization.status === 'captured') {
-        return { status: 'failed' } as const;
-      }
-
-      authorization.status = 'voided';
-      return { status: 'voided' } as const;
-    });
-  }
-
-  private async idempotent<T>(key: string, run: () => T): Promise<T> {
-    const stored = this.results.get(key);
-    if (stored !== undefined) {
-      return stored as T;
+        status: PaymentStatus.Captured,
+        captureId: payment.captureId,
+        capturedAt: payment.capturedAt,
+        alreadyCaptured: true,
+      };
     }
 
-    const pending = this.inFlight.get(key);
-    if (pending) {
-      return pending as Promise<T>;
+    if (payment.status === PaymentStatus.Voided) {
+      return { status: PaymentStatus.Voided };
     }
 
-    const promise = Promise.resolve().then(() => {
-      const result = run();
-      this.results.set(key, result);
-      return result;
-    });
-    this.inFlight.set(key, promise);
+    const authorization = await this.ensureAuthorized(payment, input);
+    switch (authorization.status) {
+      case PaymentStatus.Captured:
+        return {
+          ...authorization,
+          alreadyCaptured: true,
+        };
+      case PaymentStatus.Voided:
+      case PaymentStatus.Declined:
+        return authorization;
+      case PaymentStatus.Authorized:
+        return this.captureAuthorizedPayment(input.orderId);
+    }
+  }
 
-    return promise.finally(() => {
-      this.inFlight.delete(key);
+  /** Resolve the authorization from the payment row before capturing. */
+  private async captureAuthorizedPayment(
+    orderId: number,
+  ): Promise<OrderPaymentResult> {
+    const [payment] = await this.db
+      .select()
+      .from(payments)
+      .where(eq(payments.orderId, orderId))
+      .limit(1);
+
+    if (!payment?.authorizationId) {
+      return { status: PaymentStatus.Failed };
+    }
+
+    if (payment.status === PaymentStatus.Captured && payment.captureId) {
+      return {
+        status: PaymentStatus.Captured,
+        captureId: payment.captureId,
+        capturedAt: payment.capturedAt,
+        alreadyCaptured: true,
+      };
+    }
+
+    if (
+      payment.status !== PaymentStatus.Authorized &&
+      payment.status !== PaymentStatus.Captured
+    ) {
+      return { status: PaymentStatus.Failed };
+    }
+
+    const capture = await this.api.capture({
+      idempotencyKey: captureIdempotencyKey(orderId),
+      authorizationId: payment.authorizationId,
     });
+    if (capture.status !== PaymentStatus.Captured) {
+      await this.api.void({
+        idempotencyKey: voidIdempotencyKey(orderId),
+        authorizationId: payment.authorizationId,
+      });
+      return { status: PaymentStatus.Failed };
+    }
+
+    return {
+      status: PaymentStatus.Captured,
+      captureId: capture.captureId,
+      capturedAt: payment.capturedAt ?? new Date(),
+      alreadyCaptured: payment.status === PaymentStatus.Captured,
+    };
+  }
+
+  /** Persist capture atomically with the order's transition to active. */
+  async markCaptured(
+    tx: DatabaseTransaction,
+    orderId: number,
+    capture: { captureId: string; capturedAt: Date },
+  ): Promise<void> {
+    await tx
+      .update(payments)
+      .set({
+        status: PaymentStatus.Captured,
+        captureId: capture.captureId,
+        capturedAt: capture.capturedAt,
+      })
+      .where(eq(payments.orderId, orderId));
+  }
+
+  /** Persist voiding atomically with order cancellation and stock restoration. */
+  async markVoided(tx: DatabaseTransaction, orderId: number): Promise<void> {
+    await tx
+      .update(payments)
+      .set({ status: PaymentStatus.Voided, voidedAt: new Date() })
+      .where(
+        and(
+          eq(payments.orderId, orderId),
+          ne(payments.status, PaymentStatus.Captured),
+        ),
+      );
+  }
+
+  private async claimPayment(
+    input: ProcessOrderPaymentInput,
+  ): Promise<Payment> {
+    await this.db
+      .insert(payments)
+      .values({
+        orderId: input.orderId,
+        status: PaymentStatus.Authorizing,
+        last4: cardLast4(input.creditCardNumber),
+        amount: input.amount,
+      })
+      .onConflictDoNothing({ target: payments.orderId });
+
+    const [payment] = await this.db
+      .select()
+      .from(payments)
+      .where(eq(payments.orderId, input.orderId))
+      .limit(1);
+    if (!payment) {
+      throw new Error(`Payment for order ${input.orderId} disappeared`);
+    }
+
+    return payment;
+  }
+
+  private async ensureAuthorized(
+    payment: Payment,
+    input: ProcessOrderPaymentInput,
+  ): Promise<AuthorizationClaim> {
+    if (
+      payment.status === PaymentStatus.Authorized &&
+      payment.authorizationId
+    ) {
+      return {
+        status: PaymentStatus.Authorized,
+      };
+    }
+
+    const authorization = await this.api.authorize({
+      idempotencyKey: authorizationIdempotencyKey(payment.orderId),
+      creditCardNumber: input.creditCardNumber,
+      amount: payment.amount,
+      description: input.description,
+    });
+    if (authorization.status === PaymentStatus.Declined) {
+      return { status: PaymentStatus.Declined };
+    }
+
+    const updated = await this.persistAuthorization(payment.id, authorization);
+
+    if (updated?.authorizationId) {
+      return { status: PaymentStatus.Authorized };
+    }
+
+    return this.claimFromStoredPayment(payment.id, authorization);
+  }
+
+  /** Resolve a lost guarded authorization update against the winning row. */
+  private async claimFromStoredPayment(
+    paymentId: number,
+    authorization: { authorizationId: string; last4: string },
+  ): Promise<AuthorizationClaim> {
+    let [current] = await this.db
+      .select()
+      .from(payments)
+      .where(eq(payments.id, paymentId))
+      .limit(1);
+
+    if (!current) {
+      throw new Error(`Payment ${paymentId} disappeared after authorization`);
+    }
+
+    const claim = this.claimForStoredPayment(current);
+    if (claim) return claim;
+
+    if (current.status === PaymentStatus.Authorizing) {
+      // If the row is still authorizing, persist the provider response before
+      // returning. Capture now resolves its authorization ID from this row.
+      const updated = await this.persistAuthorization(paymentId, authorization);
+      if (updated?.authorizationId) {
+        return { status: PaymentStatus.Authorized };
+      }
+
+      [current] = await this.db
+        .select()
+        .from(payments)
+        .where(eq(payments.id, paymentId))
+        .limit(1);
+
+      const latestClaim = current && this.claimForStoredPayment(current);
+      if (latestClaim) return latestClaim;
+    }
+
+    throw new Error(
+      `Payment ${paymentId} authorization could not be persisted before capture`,
+    );
+  }
+
+  private async persistAuthorization(
+    paymentId: number,
+    authorization: { authorizationId: string; last4: string },
+  ): Promise<Payment | undefined> {
+    const [updated] = await this.db
+      .update(payments)
+      .set({
+        status: PaymentStatus.Authorized,
+        authorizationId: authorization.authorizationId,
+        authorizedAt: new Date(),
+        last4: authorization.last4,
+      })
+      .where(
+        and(
+          eq(payments.id, paymentId),
+          eq(payments.status, PaymentStatus.Authorizing),
+        ),
+      )
+      .returning();
+
+    return updated;
+  }
+
+  private claimForStoredPayment(payment: Payment): AuthorizationClaim | null {
+    if (payment.status === PaymentStatus.Captured && payment.captureId) {
+      return {
+        status: PaymentStatus.Captured,
+        captureId: payment.captureId,
+        capturedAt: payment.capturedAt,
+      };
+    }
+
+    if (
+      payment.status === PaymentStatus.Authorized &&
+      payment.authorizationId
+    ) {
+      return { status: PaymentStatus.Authorized };
+    }
+
+    if (payment.status === PaymentStatus.Voided) {
+      return { status: PaymentStatus.Voided };
+    }
+
+    return null;
   }
 }

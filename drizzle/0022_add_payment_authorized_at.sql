@@ -1,0 +1,1 @@
+ALTER TABLE "payments" ADD COLUMN "authorized_at" timestamp with time zone;

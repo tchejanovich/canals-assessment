@@ -359,6 +359,28 @@ coordinates, otherwise idempotent order replays, the coordinates stored on
 untestable. The returned coordinates are *not* geographically accurate — the mock
 mimics the interface and the determinism of a real geocoder, not its accuracy.
 
+**Payments — `PaymentsService` and the mocked `PaymentsApi`**
+
+`OrdersService` delegates payment handling to `PaymentsService`, which coordinates
+the persisted payment record and calls the mocked `PaymentsApi`. The mock's shape
+and behavior mirror a card processor closely enough to exercise the real order
+flow end to end. The operations are separate because real payment processing is
+a lifecycle: `authorize` reserves funds without moving them, `capture` completes
+the charge after the order has reserved stock, and `void` releases an
+authorization when the order cannot proceed. A card number ending in `0000` (or
+a non-positive amount) is declined; capture and void also enforce the expected
+authorization state.
+
+The mocked `PaymentsApi`'s `authorize`, `capture` and `void` methods are `async`
+and return typed promises, just like calls to a real provider that performs
+network I/O. The mock itself uses in-memory state and does not make a network
+request, but callers can `await` it using the same contract they would use for a
+real client. As with a provider such as Stripe, each operation relies on an
+idempotency key: retries with the same key replay the original result, and
+concurrent calls with that key share the same in-flight operation. This lets the
+order flow safely retry after an interrupted request without accidentally
+authorizing or capturing twice.
+
 ## API endpoints and HTTP status codes
 
 ### `POST /orders`

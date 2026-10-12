@@ -4,7 +4,6 @@ import {
   index,
   pgEnum,
   pgTable,
-  text,
   timestamp,
   uniqueIndex,
   uuid,
@@ -21,10 +20,12 @@ export const paymentStatus = pgEnum('payment_status', PAYMENT_STATUSES);
  * Payment attempt for an order. A row is claimed (status `authorizing`) as soon
  * as stock is reserved and before the provider is called, so the flow can be
  * resumed after a crash. Each order has at most one payment row and each
- * provider call uses a deterministic `idempotencyKey`, which is what stops a
- * retried or concurrent replay from charging twice. `authorizationId` and
- * `captureId` are the provider-side ids; `last4` is the last four digits of the
- * card. Monetary values are in minor units.
+ * provider call uses a deterministic, order-scoped idempotency key, which is
+ * what stops a retried or concurrent replay from charging twice.
+ * `authorizedAt`, `capturedAt` and `voidedAt` record when the application
+ * persisted each payment transition. `authorizationId` and `captureId` are the
+ * provider-side ids; `last4` is the last four digits of the card. Monetary
+ * values are in minor units.
  */
 export const payments = pgTable(
   'payments',
@@ -35,8 +36,8 @@ export const payments = pgTable(
     orderId: bigint('order_id', { mode: 'number' })
       .notNull()
       .references(() => orders.id, { onDelete: 'restrict' }),
-    idempotencyKey: text('idempotency_key').notNull(),
     authorizationId: uuid('authorization_id'),
+    authorizedAt: timestamp('authorized_at', { withTimezone: true }),
     status: paymentStatus('status')
       .notNull()
       .default(PaymentStatus.Authorizing),
@@ -51,7 +52,6 @@ export const payments = pgTable(
   },
   (table) => [
     uniqueIndex('payments_order_id_unique').on(table.orderId),
-    uniqueIndex('payments_idempotency_key_unique').on(table.idempotencyKey),
     index('payments_authorization_id_idx').on(table.authorizationId),
   ],
 );

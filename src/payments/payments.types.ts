@@ -1,3 +1,5 @@
+import { PaymentStatus } from './payment-status.js';
+
 export interface AuthorizeInput {
   idempotencyKey: string;
   creditCardNumber: string;
@@ -6,22 +8,51 @@ export interface AuthorizeInput {
 }
 
 export type AuthorizeResult =
-  | { status: 'authorized'; authorizationId: string; last4: string }
-  | { status: 'declined'; authorizationId: null; last4: string };
+  | {
+      status: typeof PaymentStatus.Authorized;
+      authorizationId: string;
+      last4: string;
+    }
+  | {
+      status: typeof PaymentStatus.Declined;
+      authorizationId: null;
+      last4: string;
+    };
 
 export interface CaptureInput {
   idempotencyKey: string;
   authorizationId: string;
-  amount: bigint;
 }
 
 export type CaptureResult =
-  | { status: 'captured'; captureId: string }
-  | { status: 'failed'; captureId: null };
+  | { status: typeof PaymentStatus.Captured; captureId: string }
+  | { status: typeof PaymentStatus.Failed; captureId: null };
 
 export interface VoidInput {
   idempotencyKey: string;
   authorizationId: string;
 }
 
-export type VoidResult = { status: 'voided' } | { status: 'failed' };
+export type VoidResult =
+  | { status: typeof PaymentStatus.Voided }
+  | { status: typeof PaymentStatus.Failed };
+
+/** Input for processing an order's complete authorization/capture lifecycle. */
+export interface ProcessOrderPaymentInput {
+  orderId: number;
+  amount: bigint;
+  creditCardNumber: string;
+  description: string;
+}
+
+/** Final payment outcome returned to the order workflow. */
+export type OrderPaymentResult =
+  | {
+      status: typeof PaymentStatus.Captured;
+      captureId: string;
+      capturedAt: Date | null;
+      alreadyCaptured: boolean;
+    }
+  | { status: typeof PaymentStatus.Declined }
+  | { status: typeof PaymentStatus.Voided }
+  | { status: typeof PaymentStatus.Failed };

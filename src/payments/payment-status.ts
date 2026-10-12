@@ -1,7 +1,8 @@
 /**
- * The only possible states of a payment, and the single source of truth for the
- * string values stored in the `payment_status` database enum. Never write the
- * literal strings elsewhere — reference `PaymentStatus.*`.
+ * Single source of truth for payment lifecycle states and operation outcomes.
+ * `PAYMENT_STATUSES` below is the persistable subset used by the
+ * `payment_status` database enum. Never write these status strings elsewhere —
+ * reference `PaymentStatus.*`.
  *
  * Lifecycle: `authorizing` -> `authorized` -> `captured` is the happy path;
  * `voided` releases a hold taken by an authorization that is not (or cannot be)
@@ -22,14 +23,16 @@ export const PaymentStatus = {
   Authorized: 'authorized',
   Captured: 'captured',
   Voided: 'voided',
+  Declined: 'declined',
+  Failed: 'failed',
 } as const;
 
 export type PaymentStatus = (typeof PaymentStatus)[keyof typeof PaymentStatus];
 
 /**
- * All possible states in declaration order — the exact values and ordering of
- * the `payment_status` database enum. `pgEnum` infers its column type from this
- * tuple, which stays literally identical to `PaymentStatus` above.
+ * Persistable states in declaration order — the exact values and ordering of
+ * the `payment_status` database enum. `Declined` and `Failed` are operation
+ * outcomes, not persisted payment states, so they are intentionally excluded.
  */
 export const PAYMENT_STATUSES = [
   PaymentStatus.Authorizing,

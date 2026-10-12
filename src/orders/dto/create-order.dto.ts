@@ -36,7 +36,6 @@ export const createOrderSchema = z.object({
   address: addressSchema,
   creditCardNumber: z
     .string()
-    .trim()
     .regex(/^\d{13,19}$/, 'creditCardNumber must be 13-19 digits'),
 });
 

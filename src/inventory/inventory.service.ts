@@ -57,19 +57,19 @@ export class InventoryService {
     warehouseId: number,
     requests: StockRequest[],
   ): Promise<void> {
-    const ordered = [...requests].sort((a, b) => a.productId - b.productId);
+    const lineItems = [...requests].sort((a, b) => a.productId - b.productId);
 
-    for (const request of ordered) {
+    for (const linteItem of lineItems) {
       await tx
         .update(inventory)
         .set({
-          quantity: sql`${inventory.quantity} + ${request.quantity}`,
+          quantity: sql`${inventory.quantity} + ${linteItem.quantity}`,
           updatedAt: new Date(),
         })
         .where(
           and(
             eq(inventory.warehouseId, warehouseId),
-            eq(inventory.productId, request.productId),
+            eq(inventory.productId, linteItem.productId),
           ),
         );
     }
