@@ -44,7 +44,7 @@ import {
 import {
   buildPricedLineItems,
   calculateSubtotal,
-  validateAndResolveCurrency,
+  resolveCurrency,
 } from './orders.pricing.js';
 import { OrderState } from './order-state.js';
 
@@ -106,12 +106,12 @@ export class OrdersService {
       throw new CustomerNotFoundError(dto.customerId);
     }
 
-    const productById = await this.resolveProductMap(dto);
+    const productById = await this.resolveProducts(dto);
 
     const pricedLineItems = buildPricedLineItems(dto, productById);
     const subtotalAmount = calculateSubtotal(pricedLineItems);
 
-    const currency = validateAndResolveCurrency(pricedLineItems);
+    const currency = resolveCurrency(pricedLineItems);
     if (currency === null) {
       throw new MixedCurrencyError();
     }
@@ -124,12 +124,12 @@ export class OrdersService {
 
     const coordinates = await this.addresses.resolveCoordinates(dto.address);
 
-    const candidates = await this.warehouses.findFulfillingWarehouses(
+    const warehouseCandidates = await this.warehouses.findFulfillingWarehouses(
       dto.items,
       coordinates,
       WAREHOUSE_FALLBACK_ATTEMPTS,
     );
-    if (candidates.length === 0) {
+    if (warehouseCandidates.length === 0) {
       this.logger.warn(
         `No single warehouse can fulfil customer ${dto.customerId}'s ${dto.items.length} item(s)`,
       );
@@ -147,7 +147,7 @@ export class OrdersService {
       countryId,
       regionId,
       coordinates,
-      candidates,
+      candidates: warehouseCandidates,
       items: dto.items,
       subtotalAmount,
       totalAmount,
@@ -179,7 +179,7 @@ export class OrdersService {
     return toCreatedOrderResult(finalized, pricedLineItems);
   }
 
-  private async resolveProductMap(
+  private async resolveProducts(
     dto: CreateOrderDto,
   ): Promise<Map<number, Product>> {
     const productRows = await this.products.findByIds(

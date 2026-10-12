@@ -26,7 +26,7 @@ export function calculateSubtotal(pricedLineItems: PricedLineItem[]): bigint {
   return pricedLineItems.reduce((sum, line) => sum + line.lineTotalAmount, 0n);
 }
 
-export function validateAndResolveCurrency(
+export function resolveCurrency(
   pricedLineItems: PricedLineItem[],
 ): string | null {
   const currency = pricedLineItems[0].product.currency;
