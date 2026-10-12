@@ -2,50 +2,7 @@ import type { CreateOrderDto } from './dto/create-order.dto.js';
 import {
   assertReplayMatchesPayload,
   computeIdempotencyRequestFingerprint,
-  isUniqueViolation,
 } from './orders.idempotency.js';
-
-describe('isUniqueViolation', () => {
-  it('finds a matching Postgres violation wrapped in query errors', () => {
-    const postgresError = Object.assign(new Error('duplicate key'), {
-      code: '23505',
-      constraint_name: 'orders_idempotency_key_unique',
-    });
-    const drizzleError = new Error('Drizzle query failed', {
-      cause: postgresError,
-    });
-    const outerError = new Error('Transaction failed', {
-      cause: drizzleError,
-    });
-
-    expect(isUniqueViolation(outerError, 'orders_idempotency_key_unique')).toBe(
-      true,
-    );
-  });
-
-  it('does not match a different unique constraint', () => {
-    const postgresError = Object.assign(new Error('duplicate key'), {
-      code: '23505',
-      constraint_name: 'customers_email_unique',
-    });
-    const drizzleError = new Error('Drizzle query failed', {
-      cause: postgresError,
-    });
-
-    expect(
-      isUniqueViolation(drizzleError, 'orders_idempotency_key_unique'),
-    ).toBe(false);
-  });
-
-  it('handles cyclic cause chains', () => {
-    const error = new Error('cyclic error') as Error & { cause?: unknown };
-    error.cause = error;
-
-    expect(isUniqueViolation(error, 'orders_idempotency_key_unique')).toBe(
-      false,
-    );
-  });
-});
 
 describe('assertReplayMatchesPayload', () => {
   it('accepts a matching fingerprint using the current address format', () => {

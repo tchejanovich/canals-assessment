@@ -48,7 +48,6 @@ import {
 import {
   assertReplayMatchesPayload,
   computeIdempotencyRequestFingerprint,
-  isUniqueViolation,
 } from './orders.idempotency.js';
 import {
   toCreatedOrderResult,
@@ -71,6 +70,13 @@ import type { PricedLineItem } from './orders.types.js';
  * attempted.
  */
 const WAREHOUSE_FALLBACK_ATTEMPTS = 5;
+
+class IdempotencyKeyConflict extends Error {
+  constructor() {
+    super('Order already exists for this idempotency key');
+    this.name = new.target.name;
+  }
+}
 
 @Injectable()
 export class OrdersService {
@@ -180,6 +186,10 @@ export class OrdersService {
           idempotencyRequestFingerprint: requestFingerprint,
           pricedLineItems,
         });
+        if (!order) {
+          // Abort the transaction so address changes from the losing request roll back too.
+          throw new IdempotencyKeyConflict();
+        }
 
         const reserved = await this.tryReserveOrder(
           tx,
@@ -196,24 +206,18 @@ export class OrdersService {
         return { order, state: OrderState.Created };
       });
     } catch (error) {
-      if (
-        idempotencyKey &&
-        isUniqueViolation(error, 'orders_idempotency_key_unique')
-      ) {
-        // Two requests raced with the same new key; the loser attached to the
-        // committed winner instead of creating a duplicate order.
-        const replayed = await this.resolveIdempotentReplay(
-          idempotencyKey,
-          dto,
-        );
-        if (replayed) {
-          this.logger.log(
-            `Idempotency key ${idempotencyKey} raced; attached to existing order ${replayed.id}`,
-          );
-          return { order: replayed, created: false };
-        }
+      if (!(error instanceof IdempotencyKeyConflict) || !idempotencyKey) {
+        throw error;
       }
-      throw error;
+
+      // The transaction rolled back; attach to the committed winner instead.
+      const replayed = await this.resolveIdempotentReplay(idempotencyKey, dto);
+      if (!replayed) throw error;
+
+      this.logger.log(
+        `Idempotency key ${idempotencyKey} raced; attached to existing order ${replayed.id}`,
+      );
+      return { order: replayed, created: false };
     }
 
     if (outcome.state === OrderState.Created) {
@@ -227,7 +231,8 @@ export class OrdersService {
   /**
    * Persists the order header (in state `created`, before any stock is
    * reserved) together with its line items, both inside the caller's
-   * transaction so they commit atomically. Returns the inserted header.
+   * transaction so they commit atomically. Returns `null` if another request
+   * already inserted the idempotency key.
    */
   private async insertOrderWithItems(
     tx: DatabaseTransaction,
@@ -243,7 +248,7 @@ export class OrdersService {
       idempotencyRequestFingerprint: string | null;
       pricedLineItems: PricedLineItem[];
     },
-  ): Promise<Order> {
+  ): Promise<Order | null> {
     const [order] = await tx
       .insert(orders)
       .values({
@@ -265,7 +270,10 @@ export class OrdersService {
         idempotencyRequestFingerprint: input.idempotencyRequestFingerprint,
         state: OrderState.Created,
       })
+      .onConflictDoNothing({ target: orders.idempotencyKey })
       .returning();
+
+    if (!order) return null;
 
     await tx.insert(orderItems).values(
       input.pricedLineItems.map((line) => ({

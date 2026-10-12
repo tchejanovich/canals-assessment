@@ -3,46 +3,9 @@ import type { CreateOrderDto } from './dto/create-order.dto.js';
 import { IdempotencyKeyReusedError } from './orders.errors.js';
 
 /**
- * Pure idempotency helpers: fingerprint a request, compare a replay against the
- * stored fingerprint, and recognise the unique-key violation the database
- * raises when two concurrent requests race the same new key.
+ * Pure idempotency helpers: fingerprint a request and compare a replay against
+ * the stored fingerprint.
  */
-
-/**
- * Recognises a Postgres unique-constraint violation (`23505`) for a specific
- * constraint. Used to catch the `orders_idempotency_key_unique` race, but
- * deliberately generic so it can guard any unique index.
- */
-export function isUniqueViolation(error: unknown, constraint: string): boolean {
-  const seen = new Set<object>();
-  let current = error;
-
-  while (
-    typeof current === 'object' &&
-    current !== null &&
-    !seen.has(current)
-  ) {
-    seen.add(current);
-    const candidate = current as {
-      code?: unknown;
-      constraint_name?: unknown;
-      constraint?: unknown;
-      cause?: unknown;
-    };
-
-    if (
-      candidate.code === '23505' &&
-      (candidate.constraint_name === constraint ||
-        candidate.constraint === constraint)
-    ) {
-      return true;
-    }
-
-    current = candidate.cause;
-  }
-
-  return false;
-}
 
 /**
  * Returns a canonical string identifying the full request payload. The object
