@@ -1,21 +1,21 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { asc, eq } from 'drizzle-orm';
+import { asc, eq, type SQL } from 'drizzle-orm';
 import { AddressesService } from '../addresses/addresses.service.js';
 import { CustomersService } from '../customers/customers.service.js';
 import { DATABASE, type Database } from '../db/database.module.js';
 import {
+  countries,
+  customers,
   orderItems,
-  type Order,
   orders,
   type Product,
+  regions,
+  warehouses,
 } from '../db/schema/index.js';
 import { ProductsService } from '../products/products.service.js';
 import { WarehousesService } from '../warehouses/warehouses.service.js';
 import type { CreateOrderDto } from './dto/create-order.dto.js';
-import type {
-  OrderItemResponse,
-  OrderResponse,
-} from './dto/order-response.dto.js';
+import type { OrderResponse } from './dto/order-response.dto.js';
 import {
   IdempotencyKeyConflict,
   MixedCurrencyError,
@@ -33,11 +33,8 @@ import {
 } from './orders.idempotency.js';
 import { OrderFinalizationService } from './order-finalization.service.js';
 import { OrderPlacementService } from './order-placement.service.js';
-import {
-  toCreatedOrderResult,
-  toOrderItem,
-  toOrderResponse,
-} from './orders.mapper.js';
+import { serializeOrder } from './order.serializer.js';
+import type { OrderSerializationInput } from './order.serializer.js';
 import {
   buildPricedLineItems,
   calculateTotal,
@@ -64,22 +61,13 @@ export class OrdersService {
   ) {}
 
   async getOrderById(orderId: number): Promise<OrderResponse> {
-    const rows = await this.db
-      .select({ order: orders, item: orderItems })
-      .from(orders)
-      .leftJoin(orderItems, eq(orderItems.orderId, orders.id))
-      .where(eq(orders.id, orderId))
-      .orderBy(asc(orderItems.id));
-
-    const firstRow = rows[0];
-    if (!firstRow) {
+    const order = await this.findOrderForSerialization(
+      eq(orders.id, orderId),
+    );
+    if (!order) {
       throw new OrderNotFoundError(orderId);
     }
-
-    const items = rows.flatMap((row) =>
-      row.item ? [toOrderItem(row.item)] : [],
-    );
-    return toOrderResponse(firstRow.order, items);
+    return serializeOrder(order);
   }
 
   async createOrder(
@@ -133,7 +121,7 @@ export class OrdersService {
       outcome.order,
       dto,
     );
-    return toCreatedOrderResult(finalized, preparedOrder.pricedLineItems);
+    return { order: await this.getOrderById(finalized.id), created: true };
   }
 
   private async prepareOrder(dto: CreateOrderDto): Promise<PreparedOrder> {
@@ -201,25 +189,66 @@ export class OrdersService {
   }
 
   private async findIdempotentOrder(key: string): Promise<{
-    order: Order;
-    items: OrderItemResponse[];
+    serialized: OrderSerializationInput;
     requestFingerprint: string | null;
   } | null> {
-    const rows = await this.db
-      .select({ order: orders, item: orderItems })
-      .from(orders)
-      .innerJoin(orderItems, eq(orderItems.orderId, orders.id))
-      .where(eq(orders.idempotencyKey, key));
+    const serialized = await this.findOrderForSerialization(
+      eq(orders.idempotencyKey, key),
+    );
+    if (!serialized) return null;
 
-    if (rows.length === 0) {
-      return null;
+    return {
+      serialized,
+      requestFingerprint: serialized.order.idempotencyRequestFingerprint,
+    };
+  }
+
+  private async findOrderForSerialization(
+    condition: SQL,
+  ): Promise<OrderSerializationInput | null> {
+    const rows = await this.db
+      .select({
+        order: orders,
+        customer: customers,
+        warehouse: warehouses,
+        warehouseRegionCode: regions.code,
+        warehouseCountryCode: countries.code,
+        item: orderItems,
+      })
+      .from(orders)
+      .innerJoin(customers, eq(customers.id, orders.customerId))
+      .leftJoin(warehouses, eq(warehouses.id, orders.warehouseId))
+      .leftJoin(regions, eq(regions.id, warehouses.regionId))
+      .leftJoin(countries, eq(countries.id, warehouses.countryId))
+      .leftJoin(orderItems, eq(orderItems.orderId, orders.id))
+      .where(condition)
+      .orderBy(asc(orderItems.id));
+
+    const firstRow = rows[0];
+    if (!firstRow) return null;
+
+    let warehouse: OrderSerializationInput['warehouse'] = null;
+    if (firstRow.warehouse) {
+      if (
+        firstRow.warehouseRegionCode === null ||
+        firstRow.warehouseCountryCode === null
+      ) {
+        throw new Error(
+          `Warehouse ${firstRow.warehouse.id} is missing region or country data`,
+        );
+      }
+      warehouse = {
+        ...firstRow.warehouse,
+        regionCode: firstRow.warehouseRegionCode,
+        countryCode: firstRow.warehouseCountryCode,
+      };
     }
 
-    const { order } = rows[0];
     return {
-      order,
-      requestFingerprint: order.idempotencyRequestFingerprint,
-      items: rows.map((row) => toOrderItem(row.item)),
+      order: firstRow.order,
+      customer: firstRow.customer,
+      warehouse,
+      items: rows.flatMap((row) => (row.item ? [row.item] : [])),
     };
   }
 
@@ -242,23 +271,26 @@ export class OrdersService {
     );
 
     this.logger.log(
-      `Idempotency key ${idempotencyKey} replay -> order ${existing.order.id} (state ${existing.order.state})`,
+      `Idempotency key ${idempotencyKey} replay -> order ${existing.serialized.order.id} (state ${existing.serialized.order.state})`,
     );
 
-    switch (existing.order.state) {
+    switch (existing.serialized.order.state) {
       case OrderState.Active:
-        return toOrderResponse(existing.order, existing.items);
+        return serializeOrder(existing.serialized);
       case OrderState.Reserved: {
         const finalized = await this.finalization.finalizeReservedOrder(
-          existing.order,
+          existing.serialized.order,
           dto,
         );
-        return toOrderResponse(finalized, existing.items);
+        return serializeOrder({
+          ...existing.serialized,
+          order: finalized,
+        });
       }
       case OrderState.Cancelled:
-        throw new OrderPaymentDeclinedError(existing.order.id);
+        throw new OrderPaymentDeclinedError(existing.serialized.order.id);
       default:
-        throw new UnfulfilledOrderError(existing.order.id);
+        throw new UnfulfilledOrderError(existing.serialized.order.id);
     }
   }
 

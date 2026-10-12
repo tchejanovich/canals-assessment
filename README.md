@@ -424,7 +424,8 @@ current state.
 Returns the order and its items by order ID using the same representation as
 `POST /orders`. The ID must be a positive integer. This endpoint was not required
 by the assessment; it was added to make it easier for the reviewer to inspect an
-order after creating it.
+order after creating it. Responses include nested customer and warehouse details;
+`warehouse` is `null` on a recorded `created` order that lost the reservation race.
 
 The endpoints return these status codes. The two `4xx`s below the validation
 bucket that are easy to confuse are the stock cases, so they get a callout.
@@ -435,7 +436,7 @@ bucket that are easy to confuse are the stock cases, so they get a callout.
 | `402 Payment Required` | The payment provider declined the card (e.g. a number ending in `0000`) | Payment was refused. The reservation was committed first, then compensated: the order is **recorded** as `cancelled` and the reserved stock returned to inventory in the same transaction (nothing ships, nothing is double-decremented) | Retry with a **new** `Idempotency-Key` (the same key will keep returning this recorded `402`). Note: `402` was chosen as the nearest standard code to “payment needed”; it is a non-standard use of the code) |
 | `404 Not Found` | On `POST /orders`, a `productId` in `items` does not exist; on `GET /orders/:id`, the order ID does not exist | The referenced entity is unknown | Use an existing product/order ID |
 | `422 Unprocessable Entity` | **No** single warehouse currently stocks every requested line in the requested quantity | This is a stock-availability *fact*, not a race: no candidate existed at all, so no order was recorded | Reduce quantity or choose different items; may genuinely resolve later |
-| `409 Conflict` | Every candidate lost the reservation race, the idempotency key was reused with a different payload, or the email belongs to a customer with a different name/phone | A race-lost order is recorded as `created`; customer details for an existing email must match | Use a new key for a new attempt, or submit the stored customer's name and phone |
+| `409 Conflict` | Every candidate lost the reservation race, the idempotency key was reused with a different payload, or an existing email has a different name/phone | A race-lost order is recorded as `created` without a warehouse; customer details for an existing email must match | Use a new key for a new attempt, or submit the stored customer's name and phone |
 | `200 OK` | `GET /orders/:id` found the order, or `POST /orders` received an `Idempotency-Key` replay where the key and payload match an existing order | A GET returns the stored order. A POST replay creates no new order; the body is the original order (id unchanged). A `reserved` order (crash between reservation and capture) is resumed | Nothing — treat as success |
 | `201 Created` | A new order was placed successfully | Stock reserved, warehouse assigned, payment approved; the body has `state: 'active'` | Nothing |
 
@@ -488,7 +489,7 @@ SUCCESS_BODY='{"customer":{"name":"Tomas","email":"tomas.chejanovich@example.com
    curl -i -X POST "$BASE_URL/orders" -H 'Content-Type: application/json' -H 'Idempotency-Key: reviewer-customer-002' --data "$NEW_CUSTOMER_BODY"
    ```
 
-   Both orders should succeed and return the same `customerId`.
+   Both orders should succeed and return the same `customer.id`.
 
 5. **Reject conflicting customer details.** Reuse the seeded email with a
    different name or phone and a fresh idempotency key. Expect `409 Conflict`.
