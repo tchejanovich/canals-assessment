@@ -10,18 +10,20 @@ import {
 import { orderItems, type Order, orders } from '../db/schema/index.js';
 import { InsufficientStockError } from '../inventory/inventory.errors.js';
 import { InventoryService } from '../inventory/inventory.service.js';
+import { CustomersService } from '../customers/customers.service.js';
 import type { WarehouseWithDistance } from '../warehouses/warehouses.service.js';
 import type {
   CreateOrderAddress,
   CreateOrderItem,
 } from './dto/create-order.dto.js';
+import type { CustomerInput } from '../customers/customers.types.js';
 import { IDEMPOTENCY_CONFLICT } from './orders.idempotency.js';
 import { IdempotencyKeyConflict, OrderVanishedError } from './orders.errors.js';
 import { OrderState } from './order-state.js';
 import type { OrderPlacementResult, PricedLineItem } from './orders.types.js';
 
 export interface PlaceOrderInput {
-  customerId: number;
+  customer: CustomerInput;
   address: CreateOrderAddress;
   countryId: number;
   regionId: number;
@@ -43,13 +45,15 @@ export class OrderPlacementService {
     @Inject(DATABASE) private readonly db: Database,
     private readonly addresses: AddressesService,
     private readonly inventory: InventoryService,
+    private readonly customers: CustomersService,
   ) {}
 
   async placeOrder(input: PlaceOrderInput): Promise<OrderPlacementResult> {
     try {
       const result = await this.db.transaction(async (tx) => {
+        const customer = await this.customers.findOrCreate(tx, input.customer);
         const address = await this.addresses.findOrCreate(tx, {
-          customerId: input.customerId,
+          customerId: customer.id,
           address: input.address,
           regionId: input.regionId,
           countryId: input.countryId,
@@ -61,7 +65,7 @@ export class OrderPlacementService {
         };
 
         const order = await this.insertOrderWithItems(tx, {
-          customerId: input.customerId,
+          customerId: customer.id,
           shippingAddressId: address.id,
           address: input.address,
           coordinates,

@@ -1,12 +1,6 @@
 import { DomainError } from '../common/domain-error.js';
 import { OrderState } from './order-state.js';
 
-export class CustomerNotFoundError extends DomainError {
-  constructor(readonly customerId: number) {
-    super(`Customer ${customerId} not found`);
-  }
-}
-
 export class ProductNotFoundError extends DomainError {
   constructor(readonly productId: number) {
     super(`Product ${productId} not found`);

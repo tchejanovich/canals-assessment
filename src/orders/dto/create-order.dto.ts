@@ -22,8 +22,23 @@ const itemSchema = z.object({
   quantity: z.number().int().positive().max(1_000_000),
 });
 
+const customerSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(1)
+    .max(100)
+    .regex(/^[A-Za-z]+$/, 'customer.name must contain only letters'),
+  email: z
+    .string()
+    .trim()
+    .email('customer.email must be a valid email')
+    .transform((email) => email.toLowerCase()),
+  phone: z.string(),
+});
+
 export const createOrderSchema = z.object({
-  customerId: z.number().int().positive(),
+  customer: customerSchema,
   items: z
     .array(itemSchema)
     .min(1)
@@ -42,3 +57,4 @@ export const createOrderSchema = z.object({
 export type CreateOrderDto = z.infer<typeof createOrderSchema>;
 export type CreateOrderAddress = z.infer<typeof addressSchema>;
 export type CreateOrderItem = z.infer<typeof itemSchema>;
+export type CreateOrderCustomer = z.infer<typeof customerSchema>;

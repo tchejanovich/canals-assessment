@@ -39,7 +39,7 @@ export class OrderFinalizationService {
       orderId,
       amount: reservedOrder.totalAmount,
       creditCardNumber: dto.creditCardNumber,
-      description: `Order ${orderId} for customer ${dto.customerId}`,
+      description: `Order ${orderId} for customer ${reservedOrder.customerId}`,
     });
 
     switch (payment.status) {

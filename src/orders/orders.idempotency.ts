@@ -19,7 +19,11 @@ function computeRequestFingerprint(
 ): string {
   const canonicalPayload = {
     creditCardNumber: dto.creditCardNumber,
-    customerId: dto.customerId,
+    customer: {
+      name: dto.customer.name,
+      email: dto.customer.email,
+      phone: dto.customer.phone,
+    },
     address: addressFingerprint,
     items: [...dto.items]
       .sort((a, b) => a.productId - b.productId)

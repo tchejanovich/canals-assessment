@@ -9,7 +9,10 @@ import {
 } from '../addresses/addresses.errors.js';
 import { InsufficientStockError } from '../inventory/inventory.errors.js';
 import {
-  CustomerNotFoundError,
+  CustomerNameMismatchError,
+  CustomerPhoneMismatchError,
+} from '../customers/customers.errors.js';
+import {
   IdempotencyKeyReusedError,
   MixedCurrencyError,
   NoFulfillingWarehouseError,
@@ -30,12 +33,13 @@ const STATUS_BY_ERROR = new Map<Function, HttpStatus>([
   [MixedCurrencyError, HttpStatus.BAD_REQUEST],
   [UnknownCountryError, HttpStatus.BAD_REQUEST],
   [UnknownRegionError, HttpStatus.BAD_REQUEST],
-  [CustomerNotFoundError, HttpStatus.NOT_FOUND],
   [OrderNotFoundError, HttpStatus.NOT_FOUND],
   [ProductNotFoundError, HttpStatus.NOT_FOUND],
   [UnfulfilledOrderError, HttpStatus.CONFLICT],
   [OrderVanishedError, HttpStatus.CONFLICT],
   [IdempotencyKeyReusedError, HttpStatus.CONFLICT],
+  [CustomerNameMismatchError, HttpStatus.CONFLICT],
+  [CustomerPhoneMismatchError, HttpStatus.CONFLICT],
   [AddressConflictError, HttpStatus.CONFLICT],
   [InsufficientStockError, HttpStatus.CONFLICT],
   [OrderPaymentDeclinedError, HttpStatus.PAYMENT_REQUIRED],

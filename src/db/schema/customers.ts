@@ -1,6 +1,6 @@
 import { bigint, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 
-/** Customers who can place orders; rows are seeded for this assessment. */
+/** Customer records created or reused when an order is placed. */
 export const customers = pgTable(
   'customers',
   {

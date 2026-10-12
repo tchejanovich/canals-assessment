@@ -17,7 +17,6 @@ import type {
   OrderResponse,
 } from './dto/order-response.dto.js';
 import {
-  CustomerNotFoundError,
   IdempotencyKeyConflict,
   MixedCurrencyError,
   NoFulfillingWarehouseError,
@@ -101,7 +100,7 @@ export class OrdersService {
       : null;
 
     const outcome = await this.placement.placeOrder({
-      customerId: dto.customerId,
+      customer: dto.customer,
       address: dto.address,
       countryId: preparedOrder.countryId,
       regionId: preparedOrder.regionId,
@@ -138,10 +137,7 @@ export class OrdersService {
   }
 
   private async prepareOrder(dto: CreateOrderDto): Promise<PreparedOrder> {
-    const customer = await this.customers.findById(dto.customerId);
-    if (!customer) {
-      throw new CustomerNotFoundError(dto.customerId);
-    }
+    await this.customers.validateForOrder(dto.customer);
 
     const productById = await this.resolveProducts(dto);
     const pricedLineItems = buildPricedLineItems(dto, productById);
@@ -165,7 +161,7 @@ export class OrdersService {
     );
     if (candidates.length === 0) {
       this.logger.warn(
-        `No single warehouse can fulfil customer ${dto.customerId}'s ${dto.items.length} item(s)`,
+        `No single warehouse can fulfil an order with ${dto.items.length} item(s)`,
       );
       throw new NoFulfillingWarehouseError();
     }
