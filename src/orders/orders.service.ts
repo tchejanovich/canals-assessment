@@ -1,54 +1,41 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { and, asc, eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import { AddressesService } from '../addresses/addresses.service.js';
-import type { Coordinates } from '../common/geo.js';
 import { CustomersService } from '../customers/customers.service.js';
-import {
-  DATABASE,
-  type Database,
-  type DatabaseTransaction,
-} from '../db/database.module.js';
+import { DATABASE, type Database } from '../db/database.module.js';
 import {
   orderItems,
   type Order,
   orders,
   type Product,
 } from '../db/schema/index.js';
-import { InsufficientStockError } from '../inventory/inventory.errors.js';
-import { InventoryService } from '../inventory/inventory.service.js';
-import { PaymentStatus } from '../payments/payment-status.js';
-import { PaymentsService } from '../payments/payments.service.js';
 import { ProductsService } from '../products/products.service.js';
-import {
-  WarehousesService,
-  type WarehouseWithDistance,
-} from '../warehouses/warehouses.service.js';
-import type {
-  CreateOrderAddress,
-  CreateOrderDto,
-  CreateOrderItem,
-} from './dto/create-order.dto.js';
+import { WarehousesService } from '../warehouses/warehouses.service.js';
+import type { CreateOrderDto } from './dto/create-order.dto.js';
 import type {
   OrderItemResponse,
   OrderResponse,
 } from './dto/order-response.dto.js';
 import {
   CustomerNotFoundError,
+  MixedCurrencyError,
   NoFulfillingWarehouseError,
   OrderNotFoundError,
   OrderPaymentDeclinedError,
-  OrderVanishedError,
-  PaymentCaptureFailedError,
-  PaymentDeclinedError,
   ProductNotFoundError,
   ProductUnavailableError,
-  ReservedOrderMissingWarehouseError,
   UnfulfilledOrderError,
 } from './orders.errors.js';
 import {
   assertReplayMatchesPayload,
   computeIdempotencyRequestFingerprint,
+  IDEMPOTENCY_CONFLICT,
 } from './orders.idempotency.js';
+import { OrderFinalizationService } from './order-finalization.service.js';
+import {
+  IdempotencyKeyConflict,
+  OrderPlacementService,
+} from './order-placement.service.js';
 import {
   toCreatedOrderResult,
   toOrderItem,
@@ -60,7 +47,6 @@ import {
   validateAndResolveCurrency,
 } from './orders.pricing.js';
 import { OrderState } from './order-state.js';
-import type { PricedLineItem } from './orders.types.js';
 
 /**
  * How many nearest-first warehouses are tried before giving up. Candidates
@@ -70,13 +56,6 @@ import type { PricedLineItem } from './orders.types.js';
  * attempted.
  */
 const WAREHOUSE_FALLBACK_ATTEMPTS = 5;
-
-class IdempotencyKeyConflict extends Error {
-  constructor() {
-    super('Order already exists for this idempotency key');
-    this.name = new.target.name;
-  }
-}
 
 @Injectable()
 export class OrdersService {
@@ -88,8 +67,8 @@ export class OrdersService {
     private readonly addresses: AddressesService,
     private readonly products: ProductsService,
     private readonly warehouses: WarehousesService,
-    private readonly inventory: InventoryService,
-    private readonly payments: PaymentsService,
+    private readonly placement: OrderPlacementService,
+    private readonly finalization: OrderFinalizationService,
   ) {}
 
   async getOrderById(orderId: number): Promise<OrderResponse> {
@@ -133,6 +112,9 @@ export class OrdersService {
     const subtotalAmount = calculateSubtotal(pricedLineItems);
 
     const currency = validateAndResolveCurrency(pricedLineItems);
+    if (currency === null) {
+      throw new MixedCurrencyError();
+    }
 
     const countryId = await this.addresses.resolveCountry(dto.address.country);
     const regionId = await this.addresses.resolveRegion(
@@ -159,186 +141,42 @@ export class OrdersService {
       ? computeIdempotencyRequestFingerprint(dto)
       : null;
 
-    let outcome: { order: Order; state: OrderState };
-    try {
-      outcome = await this.db.transaction(async (tx) => {
-        const address = await this.addresses.findOrCreate(tx, {
-          customerId: dto.customerId,
-          address: dto.address,
-          regionId,
-          countryId,
-          coordinates,
-        });
-        const addressCoordinates = {
-          latitude: Number(address.latitude),
-          longitude: Number(address.longitude),
-        };
+    const outcome = await this.placement.placeOrder({
+      customerId: dto.customerId,
+      address: dto.address,
+      countryId,
+      regionId,
+      coordinates,
+      candidates,
+      items: dto.items,
+      subtotalAmount,
+      totalAmount,
+      currency,
+      idempotencyKey: idempotencyKey ?? null,
+      idempotencyRequestFingerprint: requestFingerprint,
+      pricedLineItems,
+    });
 
-        const order = await this.insertOrderWithItems(tx, {
-          customerId: dto.customerId,
-          shippingAddressId: address.id,
-          address: dto.address,
-          coordinates: addressCoordinates,
-          subtotalAmount,
-          totalAmount,
-          currency,
-          idempotencyKey: idempotencyKey ?? null,
-          idempotencyRequestFingerprint: requestFingerprint,
-          pricedLineItems,
-        });
-        if (!order) {
-          // Abort the transaction so address changes from the losing request roll back too.
-          throw new IdempotencyKeyConflict();
-        }
-
-        const reserved = await this.tryReserveOrder(
-          tx,
-          order,
-          candidates,
-          dto.items,
-        );
-        if (reserved) {
-          return { order: reserved, state: OrderState.Reserved };
-        }
-
-        // Every candidate was exhausted by the race window: keep the order
-        // (and the deduplicated address) and let the caller report the 409.
-        return { order, state: OrderState.Created };
-      });
-    } catch (error) {
-      if (!(error instanceof IdempotencyKeyConflict) || !idempotencyKey) {
-        throw error;
+    if (outcome.kind === IDEMPOTENCY_CONFLICT) {
+      if (!idempotencyKey) {
+        throw outcome.error;
       }
-
-      // The transaction rolled back; attach to the committed winner instead.
-      const replayed = await this.resolveIdempotentReplay(idempotencyKey, dto);
-      if (!replayed) throw error;
-
-      this.logger.log(
-        `Idempotency key ${idempotencyKey} raced; attached to existing order ${replayed.id}`,
+      return this.resolveIdempotencyKeyConflict(
+        idempotencyKey,
+        dto,
+        outcome.error,
       );
-      return { order: replayed, created: false };
     }
 
     if (outcome.state === OrderState.Created) {
       throw new UnfulfilledOrderError(outcome.order.id);
     }
 
-    const finalized = await this.finalizeReservedOrder(outcome.order, dto);
-    return toCreatedOrderResult(finalized, pricedLineItems);
-  }
-
-  /**
-   * Persists the order header (in state `created`, before any stock is
-   * reserved) together with its line items, both inside the caller's
-   * transaction so they commit atomically. Returns `null` if another request
-   * already inserted the idempotency key.
-   */
-  private async insertOrderWithItems(
-    tx: DatabaseTransaction,
-    input: {
-      customerId: number;
-      shippingAddressId: number | null;
-      address: CreateOrderAddress;
-      coordinates: Coordinates;
-      subtotalAmount: bigint;
-      totalAmount: bigint;
-      currency: string;
-      idempotencyKey: string | null;
-      idempotencyRequestFingerprint: string | null;
-      pricedLineItems: PricedLineItem[];
-    },
-  ): Promise<Order | null> {
-    const [order] = await tx
-      .insert(orders)
-      .values({
-        customerId: input.customerId,
-        warehouseId: null,
-        shippingAddressId: input.shippingAddressId,
-        subtotalAmount: input.subtotalAmount,
-        totalAmount: input.totalAmount,
-        currency: input.currency,
-        shippingLine1: input.address.line1,
-        shippingLine2: input.address.line2 ?? null,
-        shippingCity: input.address.city,
-        shippingRegion: input.address.region,
-        shippingPostalCode: input.address.postalCode,
-        shippingCountry: input.address.country,
-        shippingLatitude: input.coordinates.latitude.toFixed(6),
-        shippingLongitude: input.coordinates.longitude.toFixed(6),
-        idempotencyKey: input.idempotencyKey,
-        idempotencyRequestFingerprint: input.idempotencyRequestFingerprint,
-        state: OrderState.Created,
-      })
-      .onConflictDoNothing({ target: orders.idempotencyKey })
-      .returning();
-
-    if (!order) return null;
-
-    await tx.insert(orderItems).values(
-      input.pricedLineItems.map((line) => ({
-        orderId: order.id,
-        productId: line.product.id,
-        productName: line.product.name,
-        sku: line.product.sku,
-        unitPriceAmount: line.unitPriceAmount,
-        quantity: line.quantity,
-        lineTotalAmount: line.lineTotalAmount,
-        currency: input.currency,
-      })),
+    const finalized = await this.finalization.finalizeReservedOrder(
+      outcome.order,
+      dto,
     );
-
-    return order;
-  }
-
-  /**
-   * Walks the nearest-first warehouse candidates and reserves stock at the
-   * first one that still has every line, flipping the order to `reserved` and
-   * assigning that warehouse in the same outer transaction. Each attempt runs
-   * in a nested transaction (a savepoint): `reserve` decrements line by line,
-   * so a mid-list `InsufficientStockError` must roll back that warehouse's
-   * partial decrements without aborting the order insert. Returns `null` when
-   * every candidate was exhausted, leaving the order in `created`.
-   */
-  private async tryReserveOrder(
-    tx: DatabaseTransaction,
-    order: Order,
-    candidates: WarehouseWithDistance[],
-    items: CreateOrderItem[],
-  ): Promise<Order | null> {
-    for (const warehouse of candidates) {
-      try {
-        // Savepoints roll back partial reservations and keep successful stock/order updates atomic.
-        return await tx.transaction(async (inner) => {
-          await this.inventory.reserve(inner, warehouse.id, items);
-
-          const [reserved] = await inner
-            .update(orders)
-            .set({ state: OrderState.Reserved, warehouseId: warehouse.id })
-            .where(eq(orders.id, order.id))
-            .returning();
-          if (!reserved) {
-            throw new OrderVanishedError(order.id);
-          }
-
-          this.logger.log(
-            `Order ${order.id} stock reserved at warehouse ${warehouse.id}`,
-          );
-
-          return reserved;
-        });
-      } catch (error) {
-        if (error instanceof InsufficientStockError) {
-          this.logger.debug(
-            `Order ${order.id}: warehouse ${warehouse.id} drained by a concurrent order, trying next candidate`,
-          );
-          continue;
-        }
-        throw error;
-      }
-    }
-
-    return null;
+    return toCreatedOrderResult(finalized, pricedLineItems);
   }
 
   private async resolveProductMap(
@@ -432,7 +270,10 @@ export class OrdersService {
       case OrderState.Active:
         return toOrderResponse(existing.order, existing.items);
       case OrderState.Reserved: {
-        const finalized = await this.finalizeReservedOrder(existing.order, dto);
+        const finalized = await this.finalization.finalizeReservedOrder(
+          existing.order,
+          dto,
+        );
         return toOrderResponse(finalized, existing.items);
       }
       case OrderState.Cancelled:
@@ -442,164 +283,20 @@ export class OrdersService {
     }
   }
 
-  /**
-   * Processes payment outside a transaction so inventory locks are never held
-   * across provider calls. The payment service handles authorization, capture,
-   * provider idempotency and payment-state recovery; this method applies the
-   * resulting payment outcome to the order. On payment failure, it cancels the
-   * order and restores reserved stock atomically.
-   */
-  private async finalizeReservedOrder(
-    reservedOrder: Order,
+  private async resolveIdempotencyKeyConflict(
+    idempotencyKey: string,
     dto: CreateOrderDto,
-  ): Promise<Order> {
-    const orderId = reservedOrder.id;
-    const warehouseId = reservedOrder.warehouseId;
-    if (warehouseId === null) {
-      throw new ReservedOrderMissingWarehouseError(orderId);
+    conflict: IdempotencyKeyConflict,
+  ): Promise<{ order: OrderResponse; created: false }> {
+    // The transaction rolled back; attach to the committed winner instead.
+    const replayed = await this.resolveIdempotentReplay(idempotencyKey, dto);
+    if (!replayed) {
+      throw conflict;
     }
 
-    const payment = await this.payments.processOrderPayment({
-      orderId,
-      amount: reservedOrder.totalAmount,
-      creditCardNumber: dto.creditCardNumber,
-      description: `Order ${orderId} for customer ${dto.customerId}`,
-    });
-
-    switch (payment.status) {
-      case PaymentStatus.Captured:
-        if (payment.alreadyCaptured) {
-          // A concurrent finalizer already committed capture and activation;
-          // this request may still hold a stale `reserved` order.
-          this.logger.log(
-            `Order ${orderId} payment already captured (capture ${payment.captureId}); activating`,
-          );
-        } else {
-          this.logger.log(
-            `Order ${orderId} payment captured (capture ${payment.captureId})`,
-          );
-        }
-        return this.finishActivation(orderId, reservedOrder, {
-          captureId: payment.captureId,
-          capturedAt: payment.capturedAt ?? new Date(),
-        });
-
-      case PaymentStatus.Voided:
-        // A previous attempt already released the hold; make sure the order is
-        // cancelled and the stock returned, then report the failure.
-        this.logger.warn(
-          `Order ${orderId} payment is voided; cancelling and restoring stock`,
-        );
-        await this.cancelOrderAndRestoreStock(orderId, warehouseId, dto.items);
-        throw new OrderPaymentDeclinedError(orderId);
-
-      case PaymentStatus.Declined:
-        this.logger.warn(
-          `Order ${orderId} payment declined; cancelling and restoring stock`,
-        );
-        await this.cancelOrderAndRestoreStock(orderId, warehouseId, dto.items);
-        throw new PaymentDeclinedError();
-
-      case PaymentStatus.Failed:
-        this.logger.error(
-          `Order ${orderId} payment capture failed; cancelling`,
-        );
-        await this.cancelOrderAndRestoreStock(orderId, warehouseId, dto.items);
-        throw new PaymentCaptureFailedError(orderId);
-    }
-  }
-
-  /**
-   * Flips a `reserved` order to `active` and records the captured payment in
-   * one transaction, guarded on the current state so a concurrent finalizer
-   * cannot double-activate. Falls back to the committed row (or, failing that,
-   * the in-memory order) when another flow already activated it.
-   */
-  private async finishActivation(
-    orderId: number,
-    reservedOrder: Order,
-    capture: { captureId: string; capturedAt: Date },
-  ): Promise<Order> {
-    const activated = await this.activateOrder(orderId, capture);
-    if (activated) {
-      return activated;
-    }
-
-    return (await this.reloadOrder(orderId)) ?? reservedOrder;
-  }
-
-  /**
-   * Flips a `reserved` order to `active` in its own tiny transaction and, in
-   * the same atomic step, marks the payment `captured`. Guarded on the current
-   * state so a concurrent finalizer cannot double-activate or store a duplicate
-   * capture: if the order already moved on, no row matches and `null` is
-   * returned.
-   */
-  private async activateOrder(
-    orderId: number,
-    capture: { captureId: string; capturedAt: Date },
-  ): Promise<Order | null> {
-    return this.db.transaction(async (tx) => {
-      const [activated] = await tx
-        .update(orders)
-        .set({ state: OrderState.Active })
-        .where(
-          and(eq(orders.id, orderId), eq(orders.state, OrderState.Reserved)),
-        )
-        .returning();
-
-      if (!activated) {
-        return null;
-      }
-
-      await this.payments.markCaptured(tx, orderId, capture);
-
-      this.logger.log(
-        `Order ${orderId} activated at warehouse ${activated.warehouseId}`,
-      );
-
-      return activated;
-    });
-  }
-
-  private async reloadOrder(orderId: number): Promise<Order | null> {
-    const [order] = await this.db
-      .select()
-      .from(orders)
-      .where(eq(orders.id, orderId))
-      .limit(1);
-    return order ?? null;
-  }
-
-  /**
-   * Compensation for a failed payment: flips the order from `reserved` to
-   * `cancelled`, returns the reserved stock, and marks the (uncaptured) payment
-   * `voided`, all in one transaction. The guards make it idempotent — a second
-   * caller matches no rows and restores nothing (no double restock), and a
-   * payment that was somehow captured is never overwritten.
-   */
-  private async cancelOrderAndRestoreStock(
-    orderId: number,
-    warehouseId: number,
-    items: CreateOrderItem[],
-  ): Promise<void> {
-    await this.db.transaction(async (tx) => {
-      const [cancelled] = await tx
-        .update(orders)
-        .set({ state: OrderState.Cancelled })
-        .where(
-          and(eq(orders.id, orderId), eq(orders.state, OrderState.Reserved)),
-        )
-        .returning({ id: orders.id });
-
-      if (cancelled) {
-        await this.inventory.restore(tx, warehouseId, items);
-        this.logger.warn(
-          `Order ${orderId} cancelled at warehouse ${warehouseId}; reserved stock returned`,
-        );
-      }
-
-      await this.payments.markVoided(tx, orderId);
-    });
+    this.logger.log(
+      `Idempotency key ${idempotencyKey} raced; attached to existing order ${replayed.id}`,
+    );
+    return { order: replayed, created: false };
   }
 }

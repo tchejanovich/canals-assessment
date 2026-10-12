@@ -1,6 +1,5 @@
 import type { Product } from '../db/schema/index.js';
 import type { CreateOrderDto } from './dto/create-order.dto.js';
-import { MixedCurrencyError } from './orders.errors.js';
 import type { PricedLineItem } from './orders.types.js';
 
 /**
@@ -29,10 +28,10 @@ export function calculateSubtotal(pricedLineItems: PricedLineItem[]): bigint {
 
 export function validateAndResolveCurrency(
   pricedLineItems: PricedLineItem[],
-): string {
+): string | null {
   const currency = pricedLineItems[0].product.currency;
   if (pricedLineItems.some((line) => line.product.currency !== currency)) {
-    throw new MixedCurrencyError();
+    return null;
   }
   return currency;
 }

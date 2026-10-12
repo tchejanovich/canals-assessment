@@ -2,6 +2,8 @@ import { buildAddressFingerprint } from '../addresses/address-fingerprint.js';
 import type { CreateOrderDto } from './dto/create-order.dto.js';
 import { IdempotencyKeyReusedError } from './orders.errors.js';
 
+export const IDEMPOTENCY_CONFLICT = 'idempotency-conflict';
+
 /**
  * Pure idempotency helpers: fingerprint a request and compare a replay against
  * the stored fingerprint.

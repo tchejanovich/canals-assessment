@@ -6,6 +6,8 @@ import { PaymentsModule } from '../payments/payments.module.js';
 import { ProductsModule } from '../products/products.module.js';
 import { WarehousesModule } from '../warehouses/warehouses.module.js';
 import { OrdersController } from './orders.controller.js';
+import { OrderFinalizationService } from './order-finalization.service.js';
+import { OrderPlacementService } from './order-placement.service.js';
 import { OrdersService } from './orders.service.js';
 
 @Module({
@@ -18,6 +20,6 @@ import { OrdersService } from './orders.service.js';
     PaymentsModule,
   ],
   controllers: [OrdersController],
-  providers: [OrdersService],
+  providers: [OrdersService, OrderPlacementService, OrderFinalizationService],
 })
 export class OrdersModule {}

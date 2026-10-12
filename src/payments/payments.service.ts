@@ -94,10 +94,7 @@ export class PaymentsService {
       };
     }
 
-    if (
-      payment.status !== PaymentStatus.Authorized &&
-      payment.status !== PaymentStatus.Captured
-    ) {
+    if (payment.status !== PaymentStatus.Authorized) {
       return { status: PaymentStatus.Failed };
     }
 
@@ -117,7 +114,7 @@ export class PaymentsService {
       status: PaymentStatus.Captured,
       captureId: capture.captureId,
       capturedAt: payment.capturedAt ?? new Date(),
-      alreadyCaptured: payment.status === PaymentStatus.Captured,
+      alreadyCaptured: false,
     };
   }
 
