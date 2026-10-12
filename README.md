@@ -444,6 +444,75 @@ order (with stock restored) rather than a silent rollback.
 
 Anything else (server faults, unavailable dependencies) surfaces as a `500`.
 
+### Manual reviewer test cases
+
+Run these against a fresh database after migrations and seed data have been
+applied. The seed data creates customer `1`, product `1` (`PVC150`, stocked at
+Miami Central), and product `2` (`PVCCEMENTQT`, with no inventory). Start the API
+at `http://localhost:3000`, then set:
+
+```bash
+BASE_URL=http://localhost:3000
+SUCCESS_BODY='{"customerId":1,"address":{"line1":"123 Main St","line2":null,"city":"New York","region":"NY","postalCode":"10001","country":"US"},"items":[{"productId":1,"quantity":2}],"creditCardNumber":"4242424242424242"}'
+```
+
+1. **Create and retrieve a successful order.**
+
+   ```bash
+   curl -i -X POST "$BASE_URL/orders" \
+     -H 'Content-Type: application/json' \
+     -H 'Idempotency-Key: reviewer-success-001' \
+     --data "$SUCCESS_BODY"
+   curl -i "$BASE_URL/orders/<ORDER_ID_FROM_RESPONSE>"
+   ```
+
+   Expect `201 Created`, an active order assigned to a warehouse, and a total of
+   `2400` USD minor units. The GET should return that same order with `200 OK`.
+
+2. **Replay the same request.** Repeat the first POST with the same key and body.
+   Expect `200 OK` and the same order ID; no new order or payment is created.
+
+3. **Reuse a key with a different payload.** Change `quantity` in `SUCCESS_BODY`
+   to `3`, but reuse `reviewer-success-001`. Expect `409 Conflict`.
+
+4. **Exercise payment decline and recorded replay.** Use a fresh key and a card
+   number ending in `0000`:
+
+   ```bash
+   curl -i -X POST "$BASE_URL/orders" \
+     -H 'Content-Type: application/json' \
+     -H 'Idempotency-Key: reviewer-decline-001' \
+     --data '{"customerId":1,"address":{"line1":"123 Main St","line2":null,"city":"New York","region":"NY","postalCode":"10001","country":"US"},"items":[{"productId":1,"quantity":1}],"creditCardNumber":"4242424242420000"}'
+   ```
+
+   Expect `402 Payment Required`; the order is recorded as cancelled and its
+   reserved stock restored. Repeating that exact request with the same key
+   returns the recorded `402`. Use a new key to attempt a new order.
+
+5. **Request an item with no stock.** Change the successful request's
+   `productId` to `2` and use a fresh key. Expect `422 Unprocessable Entity` and
+   no order row.
+
+6. **Check request errors.** A nonexistent product ID such as `999999` returns
+   `404 Not Found`. Repeating the same product ID twice in `items` returns
+   `400 Bad Request` during request validation.
+
+7. **Optionally exercise the reservation race.** Reset product `PVC150` at
+   `Miami Central` to 100 units in a SQL client:
+
+   ```sql
+   UPDATE inventory
+   SET quantity = 100
+   WHERE warehouse_id = (SELECT id FROM warehouses WHERE name = 'Miami Central')
+     AND product_id = (SELECT id FROM products WHERE sku = 'PVC150');
+   ```
+
+   Then submit two quantity-60 requests at once, each with a different
+   idempotency key. If both select the warehouse before either reserves stock,
+   expect one success and one recorded `409` race loss. If the second request
+   checks availability after the first reservation, it may instead get `422`
+   because no candidate is available at selection time.
+
 ## Project setup
 
 ```bash

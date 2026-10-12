@@ -1,7 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { asc, eq } from 'drizzle-orm';
 import { AddressesService } from '../addresses/addresses.service.js';
-import type { Coordinates } from '../common/geo.js';
 import { CustomersService } from '../customers/customers.service.js';
 import { DATABASE, type Database } from '../db/database.module.js';
 import {
@@ -11,10 +10,7 @@ import {
   type Product,
 } from '../db/schema/index.js';
 import { ProductsService } from '../products/products.service.js';
-import {
-  WarehousesService,
-  type WarehouseWithDistance,
-} from '../warehouses/warehouses.service.js';
+import { WarehousesService } from '../warehouses/warehouses.service.js';
 import type { CreateOrderDto } from './dto/create-order.dto.js';
 import type {
   OrderItemResponse,
@@ -49,7 +45,7 @@ import {
   resolveCurrency,
 } from './orders.pricing.js';
 import { OrderState } from './order-state.js';
-import type { PricedLineItem } from './orders.types.js';
+import type { PreparedOrder } from './orders.types.js';
 
 /**
  * How many nearest-first warehouses are tried before giving up. Candidates
@@ -59,16 +55,6 @@ import type { PricedLineItem } from './orders.types.js';
  * attempted.
  */
 const WAREHOUSE_FALLBACK_ATTEMPTS = 5;
-
-interface PreparedOrder {
-  pricedLineItems: PricedLineItem[];
-  totalAmount: bigint;
-  currency: string;
-  countryId: number;
-  regionId: number;
-  coordinates: Coordinates;
-  candidates: WarehouseWithDistance[];
-}
 
 @Injectable()
 export class OrdersService {
@@ -135,7 +121,7 @@ export class OrdersService {
       pricedLineItems: preparedOrder.pricedLineItems,
     });
 
-    if (outcome.kind === IDEMPOTENCY_CONFLICT) {
+    if (outcome.type === IDEMPOTENCY_CONFLICT) {
       if (!idempotencyKey) {
         throw outcome.error;
       }

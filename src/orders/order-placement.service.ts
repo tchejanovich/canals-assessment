@@ -88,10 +88,10 @@ export class OrderPlacementService {
         return { order, state: OrderState.Created };
       });
 
-      return { kind: 'placed', ...result };
+      return { type: 'placed', ...result };
     } catch (error) {
       if (error instanceof IdempotencyKeyConflict) {
-        return { kind: IDEMPOTENCY_CONFLICT, error };
+        return { type: IDEMPOTENCY_CONFLICT, error };
       }
       throw error;
     }

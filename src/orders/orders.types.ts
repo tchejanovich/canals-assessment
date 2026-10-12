@@ -1,7 +1,9 @@
 import type { Order, Product } from '../db/schema/index.js';
+import type { Coordinates } from '../common/geo.js';
 import { IDEMPOTENCY_CONFLICT } from './orders.idempotency.js';
 import type { OrderState } from './order-state.js';
 import type { IdempotencyKeyConflict } from './orders.errors.js';
+import type { WarehouseWithDistance } from '../warehouses/warehouses.service.js';
 
 export interface PricedLineItem {
   product: Product;
@@ -10,6 +12,16 @@ export interface PricedLineItem {
   lineTotalAmount: bigint;
 }
 
+export interface PreparedOrder {
+  pricedLineItems: PricedLineItem[];
+  totalAmount: bigint;
+  currency: string;
+  countryId: number;
+  regionId: number;
+  coordinates: Coordinates;
+  candidates: WarehouseWithDistance[];
+}
+
 export type OrderPlacementResult =
-  | { kind: 'placed'; order: Order; state: OrderState }
-  | { kind: typeof IDEMPOTENCY_CONFLICT; error: IdempotencyKeyConflict };
+  | { type: 'placed'; order: Order; state: OrderState }
+  | { type: typeof IDEMPOTENCY_CONFLICT; error: IdempotencyKeyConflict };
