@@ -14,7 +14,6 @@ export interface OrderResponse {
   customerId: number;
   warehouseId: number | null;
   state: OrderState;
-  subtotalAmount: string;
   totalAmount: string;
   currency: string;
   shippingAddress: {

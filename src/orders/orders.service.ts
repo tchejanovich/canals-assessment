@@ -43,7 +43,7 @@ import {
 } from './orders.mapper.js';
 import {
   buildPricedLineItems,
-  calculateSubtotal,
+  calculateTotal,
   resolveCurrency,
 } from './orders.pricing.js';
 import { OrderState } from './order-state.js';
@@ -109,7 +109,7 @@ export class OrdersService {
     const productById = await this.resolveProducts(dto);
 
     const pricedLineItems = buildPricedLineItems(dto, productById);
-    const subtotalAmount = calculateSubtotal(pricedLineItems);
+    const totalAmount = calculateTotal(pricedLineItems);
 
     const currency = resolveCurrency(pricedLineItems);
     if (currency === null) {
@@ -136,7 +136,6 @@ export class OrdersService {
       throw new NoFulfillingWarehouseError();
     }
 
-    const totalAmount = subtotalAmount;
     const requestFingerprint = idempotencyKey
       ? computeIdempotencyRequestFingerprint(dto)
       : null;
@@ -149,7 +148,6 @@ export class OrdersService {
       coordinates,
       candidates: warehouseCandidates,
       items: dto.items,
-      subtotalAmount,
       totalAmount,
       currency,
       idempotencyKey: idempotencyKey ?? null,

@@ -38,7 +38,6 @@ export const orders = pgTable(
     shippingAddressId: bigint('shipping_address_id', {
       mode: 'number',
     }).references(() => addresses.id, { onDelete: 'restrict' }),
-    subtotalAmount: bigint('subtotal_amount', { mode: 'bigint' }).notNull(),
     totalAmount: bigint('total_amount', { mode: 'bigint' }).notNull(),
     currency: char('currency', { length: 3 }).notNull(),
     shippingLine1: text('shipping_line1').notNull(),

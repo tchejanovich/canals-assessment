@@ -48,7 +48,6 @@ export function toOrderResponse(
     customerId: order.customerId,
     warehouseId: order.warehouseId,
     state: order.state,
-    subtotalAmount: order.subtotalAmount.toString(),
     totalAmount: order.totalAmount.toString(),
     currency: order.currency,
     shippingAddress: {

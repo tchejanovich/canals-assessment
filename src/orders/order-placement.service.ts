@@ -28,7 +28,6 @@ export interface PlaceOrderInput {
   coordinates: Coordinates;
   candidates: WarehouseWithDistance[];
   items: CreateOrderItem[];
-  subtotalAmount: bigint;
   totalAmount: bigint;
   currency: string;
   idempotencyKey: string | null;
@@ -77,7 +76,6 @@ export class OrderPlacementService {
           shippingAddressId: address.id,
           address: input.address,
           coordinates,
-          subtotalAmount: input.subtotalAmount,
           totalAmount: input.totalAmount,
           currency: input.currency,
           idempotencyKey: input.idempotencyKey,
@@ -121,7 +119,6 @@ export class OrderPlacementService {
       shippingAddressId: number | null;
       address: CreateOrderAddress;
       coordinates: Coordinates;
-      subtotalAmount: bigint;
       totalAmount: bigint;
       currency: string;
       idempotencyKey: string | null;
@@ -135,7 +132,6 @@ export class OrderPlacementService {
         customerId: input.customerId,
         warehouseId: null,
         shippingAddressId: input.shippingAddressId,
-        subtotalAmount: input.subtotalAmount,
         totalAmount: input.totalAmount,
         currency: input.currency,
         shippingLine1: input.address.line1,

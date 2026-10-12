@@ -162,6 +162,13 @@
       "when": 1791815943969,
       "tag": "0022_add_payment_authorized_at",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1791837166014,
+      "tag": "0023_drop_order_subtotal_amount",
+      "breakpoints": true
     }
   ]
 }

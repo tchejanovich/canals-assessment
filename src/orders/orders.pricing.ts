@@ -22,7 +22,7 @@ export function buildPricedLineItems(
   });
 }
 
-export function calculateSubtotal(pricedLineItems: PricedLineItem[]): bigint {
+export function calculateTotal(pricedLineItems: PricedLineItem[]): bigint {
   return pricedLineItems.reduce((sum, line) => sum + line.lineTotalAmount, 0n);
 }
 
