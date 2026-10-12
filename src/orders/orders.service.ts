@@ -300,6 +300,7 @@ export class OrdersService {
   ): Promise<Order | null> {
     for (const warehouse of candidates) {
       try {
+        // Savepoints roll back partial reservations and keep successful stock/order updates atomic.
         return await tx.transaction(async (inner) => {
           await this.inventory.reserve(inner, warehouse.id, items);
 
