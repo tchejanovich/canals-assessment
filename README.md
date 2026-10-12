@@ -466,7 +466,7 @@ To also update an ECS service, pass the service name to `deploy-ecs.sh`. Set
 AWS_REGION=us-east-2 \
 ECR_REPOSITORY=canals-api \
 ECS_CLUSTER=canals-cluster \
-./scripts/deploy-ecs.sh canals-service
+./scripts/deploy-ecs.sh canals-api-service
 ```
 
 The ECS script invokes `deploy-ecr.sh`, creates a task definition revision with
