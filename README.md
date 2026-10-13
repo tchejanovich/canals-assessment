@@ -110,7 +110,7 @@ The application is available for testing on **[https://tchejanovich-canals-asses
 
 Test scenarios, curl examples, and expected responses are in [testing/test-cases.md](testing/test-cases.md).
 
-## Technical decisions explained **(no AI generated text in here ;)**
+## Technical decisions explained
 
 Warehouses don't use the `addresses` table:
 The `addresses` table is designed for customers only. Warehouses have their address embedded in the row. The fields are mostly the same, but I thought it made sense to keep them separate because they serve different entities. Eventually, they could differ in multiple ways, like the warehouse address having warehouse-specific data, or the customer address syncing with an external shipping platform (and therefore having an external_id).
@@ -118,13 +118,14 @@ The `addresses` table is designed for customers only. Warehouses have their addr
 Nearest-warehouse selection is done in the database:
 Deciding how and where to calculate the distance from the customer address to the warehouse was probably the toughest decision of the assessment. There were two main options:
 
-- Getting all the warehouses with enough stock from the DB and then calculating and sorting by distance in memory.
-- Doing the stock check, the distance calculation, and sorting in the DB.
+-⁠ ⁠Getting all the warehouses with enough stock from the DB and then calculating and sorting by distance in memory.
+-⁠ ⁠Doing the stock check, the distance calculation, and sorting in the DB.
 
-The first approach is likely faster overall and causes less trouble for the DB, but it fails at scale: what if we have thousands or millions of warehouses that can fulfill the order?
+The first approach can be faster and causes less trouble for the DB, but it fails at scale: what if we have thousands or millions of warehouses that can fulfill the order?
 In that scenario, checking the DB makes more sense than reading and filtering a bunch of rows in memory.
 If we know we're gonna deal with a low amount of warehouse candidates, the first option is better.
-In this case, I chose the second one to ensure a highly scalable solution, and the PostGIS index makes the database calculation much more performant. Indices are expensive in storage, but this distance calculation is core to the solution, so the cost seems fair.
+In this case, I chose the second one since it scales better, and the PostGIS index can make the distance ranking more performant. Indices are expensive in storage, but this distance calculation is core to the solution, so the cost seems fair.
+That said, I don't think there is a silver bullet here, and the best answer can only be determined by testing against the actual data.
 
 Order states:
 The orders have 4 possible states: `created → reserved → active`, with `failed` as the terminal state for a declined card or stock issue. I'll explain them from the most obvious to the least obvious.
