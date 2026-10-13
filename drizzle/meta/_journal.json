@@ -176,6 +176,13 @@
       "when": 1791855637238,
       "tag": "0024_seed_review_test_fixtures",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1791859793978,
+      "tag": "0025_replace_cancelled_order_state",
+      "breakpoints": true
     }
   ]
 }

@@ -74,7 +74,7 @@ export class IdempotencyKeyConflict extends Error {
 export class OrderPaymentDeclinedError extends DomainError {
   constructor(readonly orderId: number) {
     super(
-      `Order ${orderId} had its payment declined; it is recorded as '${OrderState.Cancelled}' ` +
+      `Order ${orderId} had its payment declined; it is recorded as '${OrderState.Failed}' ` +
         `and any reserved stock was returned. Retry with a new idempotency key to attempt it again`,
     );
   }
@@ -90,7 +90,7 @@ export class PaymentCaptureFailedError extends DomainError {
   constructor(readonly orderId: number) {
     super(
       `Order ${orderId} authorized but its payment capture failed; the authorization was released, ` +
-        `the order is recorded as '${OrderState.Cancelled}' and any reserved stock was returned. ` +
+        `the order is recorded as '${OrderState.Failed}' and any reserved stock was returned. ` +
         `Retry with a new idempotency key to attempt it again`,
     );
   }

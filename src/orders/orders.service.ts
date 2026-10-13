@@ -256,7 +256,7 @@ export class OrdersService {
   }
 
   /** Replays must match the stored payload. Active orders return as-is; reserved
-   * orders resume payment; created/cancelled orders return their recorded errors.
+   * orders resume payment; created/failed orders return their recorded errors.
    */
   private async resolveIdempotentReplay(
     idempotencyKey: string,
@@ -290,7 +290,7 @@ export class OrdersService {
           order: finalized,
         });
       }
-      case OrderState.Cancelled:
+      case OrderState.Failed:
         throw new OrderPaymentDeclinedError(existing.serialized.order.id);
       default:
         throw new UnfulfilledOrderError(existing.serialized.order.id);

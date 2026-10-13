@@ -15,6 +15,8 @@ pass, `1` if a check fails, and `2` if a prerequisite is missing. It initializes
 fixture inventory and creates run-specific customers, addresses, and orders in
 the test database.
 
+**Feel free to ask me for the database credentials to be able to run the suite against https://tchejanovich-canals-assessment.com!**
+
 ## Cases and expectations
 
 ### Health check
@@ -82,7 +84,7 @@ race cases alter inventory and the runner restores the baseline afterward.
 | Duplicate product IDs in one order        | `400 Bad Request`; validation error identifies `items`.                                                       |
 | Order mixes product currencies            | `400 Bad Request`; message is `All products in an order must share the same currency`.                        |
 | Payment is approved                       | `201 Created`; order is `active`, and PVC 90 inventory decreases by one.                                      |
-| Payment is declined                       | `402 Payment Required`; message is `Payment was declined`; order is cancelled and reserved stock is restored. |
+| Payment is declined                       | `402 Payment Required`; message is `Payment was declined`; order state is `failed` and reserved stock is restored. |
 
 ### Idempotency and retrieval
 
@@ -92,6 +94,6 @@ race cases alter inventory and the runner restores the baseline afterward.
 | Reuse an idempotency key with a changed payload         | First response is `201 Created`; changed replay is `409 Conflict`.                                            |
 | Send the same idempotency key concurrently              | One response is `201 Created`, the other `200 OK`; both return the same order ID.                             |
 | Send identical requests without an idempotency key      | Both responses are `201 Created` with distinct order IDs; two orders are created and stock is deducted twice. |
-| Replay an order with a recorded payment decline         | Both responses are `402 Payment Required`; the replay returns the recorded cancelled outcome.                 |
+| Replay an order with a recorded payment decline         | Both responses are `402 Payment Required`; the replay returns the recorded `failed` outcome.                  |
 | Retrieve an order by ID                                 | `GET /orders/:id` returns `200 OK` with customer, warehouse, shipping address, and line items.                |
 | Retrieve an unknown order ID                            | `404 Not Found`; message identifies the missing order ID.                                                     |

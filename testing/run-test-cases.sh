@@ -395,6 +395,7 @@ check_db_value 'Successful payment decremented PVC 90 stock' 99 "$(db_scalar "SE
 
 body="$(jq -c '.creditCardNumber = "4242424242420000"' <<<"$BASE_BODY")"
 check_order 'Declined payment returns 402 and restores stock' 402 '.statusCode == 402 and .message == "Payment was declined"' "$body" "${RUN_ID}-decline"
+check_db_value 'Declined order entered failed state' 'failed' "$(db_scalar "SELECT state::text FROM orders WHERE idempotency_key = '${RUN_ID}-decline';")"
 check_db_value 'Declined payment restored glue stock' 100 "$(db_scalar "SELECT i.quantity FROM inventory i JOIN warehouses w ON w.id=i.warehouse_id JOIN products p ON p.id=i.product_id WHERE w.name='Miami Closest' AND p.sku='PVC-GLUE-QT';")"
 
 key="${RUN_ID}-replay"
@@ -441,7 +442,7 @@ fi
 declined_body="$(jq -c '.creditCardNumber = "4242424242420000"' <<<"$BASE_BODY")"
 key="${RUN_ID}-declined-replay"
 check_order 'First declined request is recorded' 402 '.statusCode == 402 and .message == "Payment was declined"' "$declined_body" "$key"
-check_order 'Recorded declined request replays its outcome' 402 '.statusCode == 402 and (.message | contains("recorded as '\''cancelled'\''")) and (.message | contains("stock was returned"))' "$declined_body" "$key"
+check_order 'Recorded declined request replays its outcome' 402 '.statusCode == 402 and (.message | contains("recorded as '\''failed'\''")) and (.message | contains("stock was returned"))' "$declined_body" "$key"
 
 key="${RUN_ID}-retrieve"
 request_order "$BASE_BODY" "$key"

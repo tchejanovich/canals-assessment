@@ -24,7 +24,7 @@ export class OrderFinalizationService {
     private readonly payments: PaymentsService,
   ) {}
 
-  /** Captures payment or cancels the order and restores stock on failure. */
+  /** Captures payment or marks the order failed and restores stock on failure. */
   async finalizeReservedOrder(
     reservedOrder: Order,
     dto: CreateOrderDto,
@@ -60,23 +60,23 @@ export class OrderFinalizationService {
 
       case PaymentStatus.Voided:
         this.logger.warn(
-          `Order ${orderId} payment is voided; cancelling and restoring stock`,
+          `Order ${orderId} payment is voided; failing order and restoring stock`,
         );
-        await this.cancelOrderAndRestoreStock(orderId, warehouseId, dto);
+        await this.failOrderAndRestoreStock(orderId, warehouseId, dto);
         throw new OrderPaymentDeclinedError(orderId);
 
       case PaymentStatus.Declined:
         this.logger.warn(
-          `Order ${orderId} payment declined; cancelling and restoring stock`,
+          `Order ${orderId} payment declined; failing order and restoring stock`,
         );
-        await this.cancelOrderAndRestoreStock(orderId, warehouseId, dto);
+        await this.failOrderAndRestoreStock(orderId, warehouseId, dto);
         throw new PaymentDeclinedError();
 
       case PaymentStatus.Failed:
         this.logger.error(
-          `Order ${orderId} payment capture failed; cancelling`,
+          `Order ${orderId} payment capture failed; failing order`,
         );
-        await this.cancelOrderAndRestoreStock(orderId, warehouseId, dto);
+        await this.failOrderAndRestoreStock(orderId, warehouseId, dto);
         throw new PaymentCaptureFailedError(orderId);
     }
   }
@@ -131,25 +131,25 @@ export class OrderFinalizationService {
     return order ?? null;
   }
 
-  /** Cancels the order, restores stock, and voids payment in one transaction. */
-  private async cancelOrderAndRestoreStock(
+  /** Fails the order, restores stock, and voids payment in one transaction. */
+  private async failOrderAndRestoreStock(
     orderId: number,
     warehouseId: number,
     dto: CreateOrderDto,
   ): Promise<void> {
     await this.db.transaction(async (tx) => {
-      const [cancelled] = await tx
+      const [failed] = await tx
         .update(orders)
-        .set({ state: OrderState.Cancelled })
+        .set({ state: OrderState.Failed })
         .where(
           and(eq(orders.id, orderId), eq(orders.state, OrderState.Reserved)),
         )
         .returning({ id: orders.id });
 
-      if (cancelled) {
+      if (failed) {
         await this.inventory.restore(tx, warehouseId, dto.items);
         this.logger.warn(
-          `Order ${orderId} cancelled at warehouse ${warehouseId}; reserved stock returned`,
+          `Order ${orderId} failed at warehouse ${warehouseId}; reserved stock returned`,
         );
       }
 

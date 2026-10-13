@@ -43,7 +43,7 @@ export class InventoryService {
     }
   }
 
-  /** Restores reserved stock after cancellation, using the same lock order as `reserve`. */
+  /** Restores reserved stock after order failure, using the same lock order as `reserve`. */
   async restore(
     tx: DatabaseTransaction,
     warehouseId: number,

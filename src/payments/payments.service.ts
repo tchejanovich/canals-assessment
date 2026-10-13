@@ -134,7 +134,7 @@ export class PaymentsService {
       .where(eq(payments.orderId, orderId));
   }
 
-  /** Persist voiding atomically with order cancellation and stock restoration. */
+  /** Persist voiding atomically with order failure and stock restoration. */
   async markVoided(tx: DatabaseTransaction, orderId: number): Promise<void> {
     await tx
       .update(payments)
