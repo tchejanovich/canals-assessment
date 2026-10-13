@@ -112,22 +112,29 @@ Test scenarios, curl examples, and expected responses are in [testing/test-cases
 
 ## Technical decisions explained
 
-Warehouses don't use the `addresses` table:
+### Warehouses don't use the `addresses` table
+
 The `addresses` table is designed for customers only. Warehouses have their address embedded in the row. The fields are mostly the same, but I thought it made sense to keep them separate because they serve different entities. Eventually, they could differ in multiple ways, like the warehouse address having warehouse-specific data, or the customer address syncing with an external shipping platform (and therefore having an external_id).
 
-Nearest-warehouse selection is done in the database:
+### Nearest-warehouse selection is done in the database
+
 Deciding how and where to calculate the distance from the customer address to the warehouse was probably the toughest decision of the assessment. There were two main options:
 
--⁠ ⁠Getting all the warehouses with enough stock from the DB and then calculating and sorting by distance in memory.
--⁠ ⁠Doing the stock check, the distance calculation, and sorting in the DB.
+- Getting all the warehouses with enough stock from the DB and then calculating and sorting by distance in memory.
+- Doing the stock check, the distance calculation, and sorting in the DB.
 
 The first approach can be faster and causes less trouble for the DB, but it fails at scale: what if we have thousands or millions of warehouses that can fulfill the order?
+
 In that scenario, checking the DB makes more sense than reading and filtering a bunch of rows in memory.
+
 If we know we're gonna deal with a low amount of warehouse candidates, the first option is better.
+
 In this case, I chose the second one since it scales better, and the PostGIS index can make the distance ranking more performant. Indices are expensive in storage, but this distance calculation is core to the solution, so the cost seems fair.
+
 That said, I don't think there is a silver bullet here, and the best answer can only be determined by testing against the actual data.
 
-Order states:
+### Order states
+
 The orders have 4 possible states: `created → reserved → active`, with `failed` as the terminal state for a declined card or stock issue. I'll explain them from the most obvious to the least obvious.
 
 - `active`: The happy path. The order is created successfully, and the payment is captured.
@@ -135,13 +142,18 @@ The orders have 4 possible states: `created → reserved → active`, with `fail
 - `created`: This is the initial order state. It's only a transient state, no order will have `created` as its final state.
 - `reserved`: The order transitions to this state when it was created and the stock was reserved, but the payment hasn't gone through yet. It's only a final state when the server crashes before the payment can be captured. In a real system, there should be a periodic cron job that releases the stock reserved by these orders.
 
-Idempotency:
+### Idempotency
+
 This point made the code more complex in many ways, but I think it's necessary for a high-traffic, concurrency-safe, error-safe API.
+
 The POST endpoint can receive an optional (but recommended) idempotency key. If the server receives two requests with the same key, only one should proceed to payment capture, but both should be handled and return the correct states (e.g., the first returns a 201 and the second a 200). The system also supports retrying a reserved order after a system failure.
 
-Payments API mocks:
+### Payments API mocks
+
 The Payments API was mocked, but I decided to keep it real by sticking to a realistic payments interface with 3 methods: authorize, capture, and void.
+
 The system counts with the Payments API using an idempotency key (like Stripe), which ensures no order gets charged twice. I implemented some small storage mechanism in the mock to do this.
 
-The Address is snapshoted in the order:
-The `order` is associated with the `address`, but the order also snapshots the address info. Per the current system status, this is redundant since no event can modify the address row, but in a more realistic system, one might. It's also common practice to snapshot these kinds of fields in the order table
+### The Address is snapshoted in the order
+
+The `order` is associated with the `address`, but the order also snapshots the address info. Per the current system status, this is redundant since no event can modify the address row, but in a more realistic system, one might. It's also common practice to snapshot these kinds of fields in the order table.
