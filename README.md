@@ -1,412 +1,77 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+## Project setup
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+### Prerequisites
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+- **Node.js 24** and npm. The Docker image uses Node.js 24.
+- **PostgreSQL** with the **PostGIS** extension available. The migrations create
+  the extension and require a database user allowed to do so. PostgreSQL 16 with
+  PostGIS 3 is a suitable local setup; the project does not pin a server version.
 
-## Description
+### Configure and run
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+1. Create an empty PostgreSQL database, for example `canals`.
+2. Copy `.env.example` to `.env` and set `DATABASE_URL` to your local connection
+   string. Set `PORT` if you don't want to use the default `3000`.
+3. Install the locked dependencies and start the development server:
 
-## Technical decisions
+   ```bash
+   npm ci
+   npm run start:dev
+   ```
 
-### Language and framework
+   On startup, the application applies pending migrations and seeds the sample
+   customer, products, warehouses, and inventory.
 
-**TypeScript on NestJS, to match the company's stack**
+4. Check that the server is responding:
 
-The service is written in TypeScript on NestJS, and the deciding factor is that
-Canals already builds on this stack. Writing the assessment in the language and
-framework the company actually runs means the code, conventions and design
-decisions here transfer directly to production work rather than living as a
-throwaway prototype, and it is what the team reviewing it can read, extend and
-deploy without a translation layer.
+   ```bash
+   curl http://localhost:3000/health
+   ```
 
-Independent of that, NestJS fits this service well: its dependency-injection and
-module system made the external integrations (geocoding, payments) swappable
-mocks behind typed interfaces with no change to callers, and the framework's
-opinionated structure keeps the HTTP, service and persistence layers clearly
-separated.
+   The response should be `{"status":"ok"}`.
 
-**Drizzle ORM over a heavier ORM**
+## Tech stack
 
-Drizzle was chosen over a heavier, more abstract ORM (or a plain query builder)
-because this service leans on PostgreSQL-specific features that an abstraction
-would fight rather than help with:
+- **Node.js and TypeScript:** Chosen to match Canals' technology stack.
+- **NestJS:** Makes it straightforward to structure the service with different
+  architectural patterns, and it's the Node.js/TypeScript framework I'm most
+  familiar with.
+- **Drizzle ORM:** A popular, lightweight ORM that's easy to use while keeping
+  database queries flexible and close to SQL.
+- **PostgreSQL:** Chosen to match Canals' database stack.
+- **AWS:** Chosen to match Canals' infrastructure and because it's the platform
+  I know best. The deployment uses RDS for PostgreSQL, ECR for container images,
+  ECS for the service, and an EC2 Application Load Balancer. The application is
+  available to test at
+  [tchejanovich-canals-assessment.com](https://tchejanovich-canals-assessment.com/health).
 
-- The schema is defined once in TypeScript and is the single source of truth for
-  both the types and the generated migrations, so schema drift and hand-written
-  DDL are avoided.
-- The queries are intentionally close to SQL — `VALUES` joins, the atomic
-  conditional `UPDATE ... WHERE quantity >= ?` that prevents overselling, and the
-  PostGIS nearest-neighbour operators. Drizzle composes raw SQL with typed
-  columns instead of hiding those capabilities, so the concurrency and
-  distance-ranking logic is expressed directly and can be reviewed as SQL.
-- It adds no runtime metadata/reflection layer, keeping the persistence boundary
-  thin and predictable.
+## API Docs
 
-### Database
+### `GET /health`
 
-**Countries and regions live in their own tables**
+Checks that the application is responding.
 
-Countries and regions are reference (lookup) data referenced by both `addresses`
-and `warehouses`. Modeling them as tables rather than free-text columns:
-
-- Removes duplication and keeps a single spelling/source of truth for every
-  country and first-level region, instead of repeating (and mistyping) strings
-  across rows.
-- Enforces integrity at the database level: `addresses` and `warehouses` hold
-  `country_id` / `region_id` foreign keys, and a region's code is unique within
-  its country, so an invalid or inconsistent state can't be stored.
-- Gives stable ids and codes (ISO-3166 country codes, state codes) to join and
-  aggregate on, and lets new countries/regions be added as data rather than a
-  schema change.
-
-**Warehouses embed their address, customers use the `addresses` table**
-
-A warehouse's address is an intrinsic, single (1:1) attribute of the facility:
-each warehouse has exactly one, it never pluralizes, and it changes rarely. It is
-therefore stored inline on the `warehouses` row rather than in `addresses`. This
-avoids a join and a foreign key that could only ever point to one row, and keeps
-the warehouse self-contained.
-
-Customer addresses are different in nature, which is why they get their own
-table:
-
-- A customer can have many addresses (1:N).
-- Addresses are shared, deduplicated data: a canonical `fingerprint` with a
-  unique index means the same address reuses its stored coordinates rather than
-  being geocoded again on subsequent orders, even across customers. Simultaneous
-  first requests for an address may both geocode before one address row wins.
-
-The current API does not let customers modify address records, so the
-`shipping_address_id` reference alone would currently be sufficient. Orders also
-copy the chosen shipping address into the order row, a common practice because an
-order is a historical transaction: its destination should reflect what was
-submitted at purchase time, not whatever a reusable address record contains
-later. If address modification is added, this snapshot will ensure that editing
-an address does not change the displayed or fulfilled destination of an existing
-order. It also keeps the order's address details available as part of the order
-record for fulfillment, support, and audit workflows.
-
-**Nearest-warehouse selection uses PostGIS**
-
-An order must be fulfilled from a single warehouse, so the service ranks the
-warehouses that stock *every* requested product by distance to the shipping
-address. That ranking is done in the database with PostGIS rather than by
-fetching candidates and computing distances in application code:
-
-- Warehouse coordinates are mirrored into a `geography(Point, 4326)` column
-  (`warehouses.location`) backed by a GiST index. `latitude`/`longitude` stay the
-  writable source of truth; `location` is a generated, read-only shadow that
-  Postgres rebuilds automatically whenever either coordinate changes, so the two
-  can never drift and the spatial type never leaks into the application layer.
-- `geography` (rather than `geometry`) computes distances on the WGS84 spheroid
-  in metres, and the GiST index supports the `<->` nearest-neighbour operator, so
-  `ORDER BY location <-> :origin` walks the index nearest-first instead of
-  measuring every warehouse.
-- Ranking is split into two queries — first the stock filter
-  (`GROUP BY ... HAVING COUNT(*) = n`), then distance ordering over the survivors.
-  The reason is non-obvious and planner-specific, so it is explained in full
-  below.
-- The result is a nearest-first *list*, not a single pick. Stock is re-checked
-  under a row lock at reservation time, so when two orders race for the same
-  warehouse the loser falls back to the next-nearest candidate that can still
-  fulfil the order rather than failing outright.
-- The migration that adds the column also runs `CREATE EXTENSION postgis`, so a
-  fresh database provisions the extension automatically.
-
-**Why the candidate ranking is two queries, not one**
-
-The obvious way to write the ranking is a single query that filters on stock and
-orders by distance at once:
-
-```sql
-SELECT w.id
-FROM warehouses w
-JOIN inventory i ON i.warehouse_id = w.id
-JOIN (VALUES ...) AS req(product_id, quantity) ON req.product_id = i.product_id
-WHERE w.active AND i.quantity >= req.quantity
-GROUP BY w.id, w.location
-HAVING COUNT(*) = :n
-ORDER BY w.location <-> :origin
-LIMIT :k;
-```
-
-This silently loses the index. The `<->` nearest-neighbour optimisation only
-applies when `ORDER BY <->` is the top-level ordering of a *scan*; a `GROUP BY`
-forces the rows to be aggregated first, so the ordering becomes a sort over the
-aggregated result and the GiST index is bypassed. `EXPLAIN` on a 5,000-row table
-confirms it — the plan is `Limit -> Sort -> HashAggregate -> Hash Join ->
-Seq Scan`, with no `Index Scan using ..._gist`, i.e. every fulfilling warehouse
-is measured and sorted.
-
-Splitting keeps the ranking step a plain scan
-(`WHERE id = ANY(:ids) ORDER BY location <-> :origin LIMIT :k`), which the planner
-serves with the GiST index:
-
-```text
-Limit
-  -> Index Scan using warehouses_location_gist_idx on warehouses
-       Order By: (location <-> :origin)
-```
-
-so `LIMIT` stops after visiting the nearest candidates instead of measuring and
-sorting every fulfilling warehouse. The trade-off is a second round trip, and at
-a handful of warehouses the planner may just sort anyway — the split is a
-scalability hedge rather than a change you can feel at this size.
-
-The one-query form *can* keep the index if the stock test is written as a per-row
-predicate (no aggregation) instead of a `GROUP BY`:
-
-```sql
-SELECT w.id
-FROM warehouses w
-WHERE w.active AND NOT EXISTS (
-  SELECT 1 FROM (VALUES ...) AS req(product_id, quantity)
-  WHERE NOT EXISTS (
-    SELECT 1 FROM inventory i
-    WHERE i.warehouse_id = w.id AND i.product_id = req.product_id
-      AND i.quantity >= req.quantity
-  )
-)
-ORDER BY w.location <-> :origin
-LIMIT :k;
-```
-
-which plans as `Limit -> Nested Loop Anti Join -> Index Scan using ..._gist
-... Order By`. So the split is not strictly required; it is simply the clearer of
-the two index-preserving shapes.
-
-**Concurrent stock reservation is optimistic, with nearest-first fallback**
-
-Stock availability is checked twice, at different strengths, and the difference
-is what makes the system safe under concurrency:
-
-- **Candidate selection is an unlocked read.** `findFulfillingWarehouses` returns
-  the warehouses that *currently* stock every requested item, with no locks held.
-  Ranking, geocoding and pricing all happen while nothing is locked.
-- **Reservation is the source of truth.** Decrementing stock is a single atomic
-  `UPDATE inventory SET quantity = quantity - :q WHERE warehouse_id = :w AND
-  product_id = :p AND quantity >= :q`. Under contention the second writer blocks
-  on the row lock, then re-evaluates the predicate against the committed value; if
-  stock is now short it updates zero rows, which `InventoryService.reserve` turns
-  into a `ConflictException`. This is what makes overselling impossible — a
-  `quantity >= 0` check constraint is the last-resort backstop.
-
-This is optimistic concurrency: because the read is unlocked, a concurrent order
-can drain a warehouse in the gap between candidate selection and reservation. The
-reservation re-check catches that case (zero rows updated). Rather than failing
-the customer, `OrdersService` walks the nearest-first candidate list and retries
-the reservation on the next-nearest warehouse that can still fulfil the order,
-up to `WAREHOUSE_FALLBACK_ATTEMPTS`, only surfacing a `409` once every candidate
-is exhausted.
-
-The fallback exists **only** for that window. With no concurrent writer to the
-candidate's inventory the first (nearest) candidate always succeeds, since the
-read that just included it cannot have lied; candidates 2..N are reached only
-under contention. The number of attempts is a cheap insurance policy against
-losing a sale to a race, not a correctness requirement.
-
-Two supporting decisions:
-
-- **Deterministic lock ordering.** A multi-item reservation updates each product
-  row in turn, so `reserve` sorts the requests by `productId` first. Without this,
-  two orders listing the same products in opposite order would acquire row locks
-  in opposite order and deadlock even when every individual row is
-  stock-sufficient.
-- **Optimistic over pessimistic.** Locking the candidate rows up front
-  (`SELECT ... FOR UPDATE`) would close the gap, but it would hold row locks across
-  geocoding and pricing and serialize competing orders for longer. The unlocked
-  read plus an atomic re-check and fallback keeps the lock window to the single
-  reserve statement.
-
-### Transaction groups: three commits, chosen by lock scope
-
-Creating an order persists address, order, lines, stock and payment — but they
-are not one transaction. The split is decided by *where the writes sit relative
-to the payment call*:
-
-- **Tx 1 — persist + reserve (one short transaction).** The address upsert, the
-  order row (state `created`), its line items and the nearest-first reservation
-  all commit together. If a candidate wins, the *same* row flips to `reserved`
-  and gets its `warehouse_id` atomically with the stock decrement — an observer
-  can never see stock taken but no order. If every candidate loses the race,
-  the order stays `created` (a recorded, harmless row) and the transaction
-  commits that outcome too; nothing was reserved or charged.
-- **Tx 2 — capture (outside any transaction).** The payment call can take
-  seconds and is retried/idempotent on the provider side. It runs *after* the
-  reservation commits, so no inventory row lock is ever held across it, and
-  nothing in Tx 1 depends on the payment outcome — the durable writes are not
-  hostage to a provider timeout.
-- **Tx 3 — finalize (tiny, guarded).** On approval, one
-  `UPDATE … WHERE state = 'reserved'` flips the order to `active`. On decline, a
-  *compensation* transaction flips it to `cancelled` and returns the reserved
-  stock to inventory — both in the same commit, guarded on `state = 'reserved'`
-  so a retried compensation matches zero rows and restores nothing twice.
-
-Why not reserve and charge in one transaction? Transaction length and lock
-scope. Holding reserved rows for the duration of a network payment serializes
-other orders against those SKUs and leaves the reservation hostage to the
-provider. Splitting (reserve commits → charge → compensate) bounds the lock
-window to two short statements and turns a declined card into a *reversible,
-recorded* fact instead of a rollback event.
-
-Why not split order creation from reservation? Because it never extends the
-lock window — the address/order/lines are written before any reserve lock is
-acquired. Two transactions instead of one would leave a crash window with stock
-*decremented but no committed order row* (or an orphan `created` row), and a
-replay in that window would double-decrement. Keeping persist + reserve atomic
-closes that correctness gap for free.
-
-### Order states: four states, one honest lifecycle
-
-`created → reserved → active`, with `cancelled` as the compensated terminal
-state for a declined card. Each state is a committed fact, so a row always says
-exactly where the order stands:
-
-- **`created`** — header, lines and address are durably written but no warehouse
-  has won the stock race yet. This is the *recorded race loss*: a `409` caused
-  purely by contention is otherwise a black box (no way to measure how often the
-  nearest-first fallback actually loses a sale, nothing for support to inspect),
-  so the order is committed with an id and full header/line data. Deliberately
-  not shippable — no warehouse assigned, and anything that lists or fulfils
-  orders must filter on `state = 'active'` (the `state` + `created_at` index
-  exists for that). No order is *invented* by this: the "no candidate at all"
-  case returns `422` *before* any order row exists, so `created` rows only ever
-  represent genuine race losses. A `created` order also keeps its idempotency
-  key occupied.
-- **`reserved`** — a warehouse won: stock was atomically decremented and the
-  `warehouse_id` assigned, but the payment capture has not concluded. This state
-  is what makes the payment call safe to move out of the transaction — the
-  expensive, reversible decision (stock) is committed while the slow,
-  once-captured irreversible decision (money) is still pending. A crash or
-  timeout leaves a *resume point*: replaying the key re-runs the idempotent
-  capture and finalizes instead of charging twice.
-- **`active`** — stock reserved *and* payment captured: the order is real and
-  shippable, and the only state fulfilment systems should act on.
-- **`cancelled`** — the capture was declined. The reserved stock is returned to
-  inventory in the same transaction that flips the state, so a `cancelled` row
-  is the recorded outcome of a declined card: the client saw a `402`, but the
-  row says exactly what happened, and the restored stock is auditable. The key
-  stays bound, so retrying the same key returns the recorded `402` rather than
-  attempting to charge again.
-
-### Idempotency: one key = one outcome
-
-The `Idempotency-Key` header is currently optional on `POST /orders`, but clients
-should send one. Creating an order reserves stock and charges a card, so a retry
-that hit the network twice must not place two orders. A client generates a fresh
-key (a UUID is fine) per real attempt and reuses it when retrying that attempt.
-When provided, the endpoint debounces by key: the same request replay returns the
-stored result (`200`, same order id) instead of creating a duplicate order.
-Requests without the header are accepted but are not deduplicated. The common
-contracts are followed:
-
-- **Payloads are compared.** A request fingerprint is stored with the order.
-  Reusing a key with a *different* payload is client misuse and returns `409`:
-  a stored order that no longer matches what the client asked for is never
-  silently returned.
-- **Racing keys are merged.** When two requests arrive with the same new key,
-  the unique index lets the loser fail and attach to the committed winner —
-  running the same payload check, so a concurrent key-reuse with a different
-  payload also surfaces a `409`.
-- **A recorded failure owns its key.** A `created` order keeps its key, so
-  retrying the same key returns the recorded `409` rather than re-attempting;
-  a `cancelled` order keeps it too, so a retry returns the recorded `402` for
-  the declined card instead of trying to charge again. One key, one outcome —
-  to try the order again the client issues a new key. This matches the
-  idempotency-key contract used by payment providers such as Stripe.
-- **Reservations are resumable.** A replay whose stored order is `reserved`
-  means the original request committed the stock but never finished the (slow)
-  capture. The replay *resumes* it: the capture is idempotent per order, so
-  re-running it is safe, and the order is finalized to `active` in the reply.
-
-### Mocks
-
-External integrations are mocked so the project runs without third-party
-credentials or network access. Each mock keeps the same async, typed contract as
-the real dependency, so it can be swapped for a real client later without
-changing callers.
-
-**Geocoding — `GeocodingService.getCoordinates`**
-
-A real geocoder turns a postal address into latitude/longitude. The mock instead
-derives them *deterministically* from the normalized address:
-
-- each address field is trimmed and lower-cased, then serialized as a JSON array
-  in a fixed order (internal whitespace is preserved, and field boundaries are
-  unambiguous);
-- FNV-1a hashes that canonical array with separate `latitude` and `longitude`
-  labels, producing independent stable 32-bit integers;
-- the integer is mapped onto the standard coordinate ranges — latitude
-  `(latitudeHash % 1801) / 10 - 90` → −90.0…90.0, longitude
-  `(longitudeHash % 3601) / 10 - 180` → −180.0…180.0.
-
-Determinism is the point: the same address must always resolve to the same
-coordinates, otherwise idempotent order replays, the coordinates stored on
-`addresses`, and distance-based warehouse selection would be non-reproducible and
-unpredictable. The returned coordinates are *not* geographically accurate — the mock
-mimics the interface and the determinism of a real geocoder, not its accuracy.
-
-**Payments — `PaymentsService` and the mocked `PaymentsApi`**
-
-`OrdersService` delegates payment handling to `PaymentsService`, which coordinates
-the persisted payment record and calls the mocked `PaymentsApi`. The mock's shape
-and behavior mirror a card processor closely enough to exercise the real order
-flow end to end. The operations are separate because real payment processing is
-a lifecycle: `authorize` reserves funds without moving them, `capture` completes
-the charge after the order has reserved stock, and `void` releases an
-authorization when the order cannot proceed. A card number ending in `0000` (or
-a non-positive amount) is declined; capture and void also enforce the expected
-authorization state.
-
-The mocked `PaymentsApi`'s `authorize`, `capture` and `void` methods are `async`
-and return typed promises, just like calls to a real provider that performs
-network I/O. The mock itself uses in-memory state and does not make a network
-request, but callers can `await` it using the same contract they would use for a
-real client. As with a provider such as Stripe, each operation relies on an
-idempotency key: retries with the same key replay the original result, and
-concurrent calls with that key share the same in-flight operation. This lets the
-order flow safely retry after an interrupted request without accidentally
-authorizing or capturing twice.
-
-## API endpoints and HTTP status codes
+- `200 OK` — the service is healthy.
 
 ### `POST /orders`
 
-Creates an order. Send a JSON body with a customer, shipping address, items, and
-credit card number. For example:
+Creates an order from customer details, a shipping address, product items, and a
+credit card number. The `Idempotency-Key` header is optional but recommended.
+Returns the order, including its customer, selected warehouse, and line items.
 
 ```json
 {
   "customer": {
-    "name": "Tomas",
-    "email": "tomas.chejanovich@example.com",
-    "phone": "+1 305 555 0142"
+    "name": "Taylor",
+    "email": "taylor@example.com",
+    "phone": "+1 305 555 0100"
   },
   "address": {
     "line1": "123 Main St",
     "line2": null,
-    "city": "New York",
-    "region": "NY",
-    "postalCode": "10001",
+    "city": "Miami",
+    "region": "FL",
+    "postalCode": "33130",
     "country": "US"
   },
   "items": [{ "productId": 1, "quantity": 2 }],
@@ -414,226 +79,68 @@ credit card number. For example:
 }
 ```
 
-An `Idempotency-Key` header is optional, but recommended to make retries safe.
-A new successful request returns `201`; a matching replay with the same key
-returns `200`. Both return the order representation, including its items and
-current state.
+- `201 Created` — a new order was placed, stock reserved, and payment approved.
+- `200 OK` — a matching idempotency-key replay; returns the existing order.
+- `400 Bad Request` — invalid input or a business-rule violation, such as an
+  unknown country/region, inactive product, or mixed-currency items.
+- `402 Payment Required` — payment was declined or capture failed; the order is
+  cancelled and reserved stock is restored.
+- `404 Not Found` — a referenced product does not exist.
+- `409 Conflict` — the customer details do not match an existing customer, the
+  idempotency key was reused with a different payload, or all warehouse
+  candidates lost the stock-reservation race.
+- `422 Unprocessable Entity` — no single warehouse currently has all requested
+  items in the requested quantities.
+- `500 Internal Server Error` — an unexpected server error occurred.
 
 ### `GET /orders/:id`
 
-Returns the order and its items by order ID using the same representation as
-`POST /orders`. The ID must be a positive integer. This endpoint was not required
-by the assessment; it was added to make it easier for the reviewer to inspect an
-order after creating it. Responses include nested customer and warehouse details;
-`warehouse` is `null` on a recorded `created` order that lost the reservation race.
+Returns an order by its positive integer ID, including its customer, warehouse,
+and line items. This endpoint was not required for the assessment; it was added
+to make debugging easier and facilitate the reviewer's work.
 
-The endpoints return these status codes. The two `4xx`s below the validation
-bucket that are easy to confuse are the stock cases, so they get a callout.
+- `200 OK` — the order was found.
+- `400 Bad Request` — the ID is not a positive integer.
+- `404 Not Found` — no order exists with that ID.
+- `500 Internal Server Error` — an unexpected server error occurred.
 
-| Code | When it happens | What it means | What to do |
-|------|-----------------|---------------|------------|
-| `400 Bad Request` | `POST /orders` body validation failed, customer email/name validation failed, the country/region is unknown, a product is inactive, items mix currencies, or items repeat a `productId`; or `GET /orders/:id` has an invalid ID | The request is malformed or violates a business rule the server can check without stock | Fix the request; include an `Idempotency-Key` on order creation to make retries safe |
-| `402 Payment Required` | The payment provider declined the card (e.g. a number ending in `0000`) | Payment was refused. The reservation was committed first, then compensated: the order is **recorded** as `cancelled` and the reserved stock returned to inventory in the same transaction (nothing ships, nothing is double-decremented) | Retry with a **new** `Idempotency-Key` (the same key will keep returning this recorded `402`). Note: `402` was chosen as the nearest standard code to “payment needed”; it is a non-standard use of the code) |
-| `404 Not Found` | On `POST /orders`, a `productId` in `items` does not exist; on `GET /orders/:id`, the order ID does not exist | The referenced entity is unknown | Use an existing product/order ID |
-| `422 Unprocessable Entity` | **No** single warehouse currently stocks every requested line in the requested quantity | This is a stock-availability *fact*, not a race: no candidate existed at all, so no order was recorded | Reduce quantity or choose different items; may genuinely resolve later |
-| `409 Conflict` | Every candidate lost the reservation race, the idempotency key was reused with a different payload, or an existing email has a different name/phone | A race-lost order is recorded as `created` without a warehouse; customer details for an existing email must match | Use a new key for a new attempt, or submit the stored customer's name and phone |
-| `200 OK` | `GET /orders/:id` found the order, or `POST /orders` received an `Idempotency-Key` replay where the key and payload match an existing order | A GET returns the stored order. A POST replay creates no new order; the body is the original order (id unchanged). A `reserved` order (crash between reservation and capture) is resumed | Nothing — treat as success |
-| `201 Created` | A new order was placed successfully | Stock reserved, warehouse assigned, payment approved; the body has `state: 'active'` | Nothing |
+## Testing the application.
 
-The distinction worth keeping straight: **`422` is “there was never a
-candidate”, `409` is “there was, but a concurrent order beat us to it”**. Only
-the `409` records an order (as `created`), which is why its body — a message
-rather than an order object — points at a recorded id you can inspect. The
-`402` is the same philosophy applied to declined cards: a recorded `cancelled`
-order (with stock restored) rather than a silent rollback.
+The application is available for testing on **[https://tchejanovich-canals-assessment.com](https://tchejanovich-canals-assessment.com/health)**.
 
-Anything else (server faults, unavailable dependencies) surfaces as a `500`.
+Test scenarios, curl examples, and expected responses are in [testing/test-cases.md](testing/test-cases.md).
 
-### Manual reviewer test cases
+## Technical decisions explained **(no AI generated text in here ;)**
 
-Run these against a fresh database after migrations and seed data have been
-applied. The seed data includes customer Tomas, product `1` (`PVC150`, stocked at
-Miami Central), and product `2` (`PVCCEMENTQT`, with no inventory). Start the
-API at `http://localhost:3000`, then set:
+Warehouses don't use the `addresses` table:
+The `addresses` table is designed for customers only. Warehouses have their address embedded in the row. The fields are mostly the same, but I thought it made sense to keep them separate because they serve different entities. Eventually, they could differ in multiple ways, like the warehouse address having warehouse-specific data, or the customer address syncing with an external shipping platform (and therefore having an external_id).
 
-```bash
-BASE_URL=http://localhost:3000
-SUCCESS_BODY='{"customer":{"name":"Tomas","email":"tomas.chejanovich@example.com","phone":"+1 305 555 0142"},"address":{"line1":"123 Main St","line2":null,"city":"New York","region":"NY","postalCode":"10001","country":"US"},"items":[{"productId":1,"quantity":2}],"creditCardNumber":"4242424242424242"}'
-```
+Nearest-warehouse selection is done in the database:
+Deciding how and where to calculate the distance from the customer address to the warehouse was probably the toughest decision of the assessment. There were two main options:
 
-1. **Create and retrieve a successful order.**
+- Getting all the warehouses with enough stock from the DB and then calculating and sorting by distance in memory.
+- Doing the stock check, the distance calculation, and sorting in the DB.
 
-   ```bash
-   curl -i -X POST "$BASE_URL/orders" \
-     -H 'Content-Type: application/json' \
-     -H 'Idempotency-Key: reviewer-success-001' \
-     --data "$SUCCESS_BODY"
-   curl -i "$BASE_URL/orders/<ORDER_ID_FROM_RESPONSE>"
-   ```
+The first approach is likely faster overall and causes less trouble for the DB, but it fails at scale: what if we have thousands or millions of warehouses that can fulfill the order?
+In that scenario, checking the DB makes more sense than reading and filtering a bunch of rows in memory.
+If we know we're gonna deal with a low amount of warehouse candidates, the first option is better.
+In this case, I chose the second one to ensure a highly scalable solution, and the PostGIS index makes the database calculation much more performant. Indices are expensive in storage, but this distance calculation is core to the solution, so the cost seems fair.
 
-   Expect `201 Created`, an active order assigned to a warehouse, and a total of
-   `2400` USD minor units. The GET should return that same order with `200 OK`.
+Order states:
+The orders have 4 possible states: `created → reserved → active`, with `failed` as the terminal state for a declined card or stock issue. I'll explain them from the most obvious to the least obvious.
 
-2. **Replay the same request.** Repeat the first POST with the same key and body.
-   Expect `200 OK` and the same order ID; no new order or payment is created.
+- `active`: The happy path. The order is created successfully, and the payment is captured.
+- `failed`: This is the final order state when either the payment is declined, or the order was created, but then the necessary stock was reserved by another order. The failure reason will explain which one was.
+- `created`: This is the initial order state. It's only a transient state, no order will have `created` as its final state.
+- `reserved`: The order transitions to this state when it was created and the stock was reserved, but the payment hasn't gone through yet. It's only a final state when the server crashes before the payment can be captured. In a real system, there should be a periodic cron job that releases the stock reserved by these orders.
 
-3. **Reuse a key with a different payload.** Change `quantity` in `SUCCESS_BODY`
-   to `3`, but reuse `reviewer-success-001`. Expect `409 Conflict`.
+Idempotency:
+This point made the code more complex in many ways, but I think it's necessary for a high-traffic, concurrency-safe, error-safe API.
+The POST endpoint can receive an optional (but recommended) idempotency key. If the server receives two requests with the same key, only one should proceed to payment capture, but both should be handled and return the correct states (e.g., the first returns a 201 and the second a 200). The system also supports retrying a reserved order after a system failure.
 
-4. **Create and reuse a customer.** Use a fresh email and a phone value that is
-   not a phone number; phone formatting is not validated:
+Payments API mocks:
+The Payments API was mocked, but I decided to keep it real by sticking to a realistic payments interface with 3 methods: authorize, capture, and void.
+The system counts with the Payments API using an idempotency key (like Stripe), which ensures no order gets charged twice. I implemented some small storage mechanism in the mock to do this.
 
-   ```bash
-   NEW_CUSTOMER_BODY='{"customer":{"name":"Reviewer","email":"reviewer-001@example.com","phone":"not-a-phone"},"address":{"line1":"123 Main St","line2":null,"city":"New York","region":"NY","postalCode":"10001","country":"US"},"items":[{"productId":1,"quantity":1}],"creditCardNumber":"4242424242424242"}'
-   curl -i -X POST "$BASE_URL/orders" -H 'Content-Type: application/json' -H 'Idempotency-Key: reviewer-customer-001' --data "$NEW_CUSTOMER_BODY"
-   curl -i -X POST "$BASE_URL/orders" -H 'Content-Type: application/json' -H 'Idempotency-Key: reviewer-customer-002' --data "$NEW_CUSTOMER_BODY"
-   ```
-
-   Both orders should succeed and return the same `customer.id`.
-
-5. **Reject conflicting customer details.** Reuse the seeded email with a
-   different name or phone and a fresh idempotency key. Expect `409 Conflict`.
-
-6. **Exercise payment decline and recorded replay.** Use a fresh key and a card
-   number ending in `0000`:
-
-   ```bash
-   curl -i -X POST "$BASE_URL/orders" \
-     -H 'Content-Type: application/json' \
-     -H 'Idempotency-Key: reviewer-decline-001' \
-     --data '{"customer":{"name":"Tomas","email":"tomas.chejanovich@example.com","phone":"+1 305 555 0142"},"address":{"line1":"123 Main St","line2":null,"city":"New York","region":"NY","postalCode":"10001","country":"US"},"items":[{"productId":1,"quantity":1}],"creditCardNumber":"4242424242420000"}'
-   ```
-
-   Expect `402 Payment Required`; the order is recorded as cancelled and its
-   reserved stock restored. Repeating that exact request with the same key
-   returns the recorded `402`. Use a new key to attempt a new order.
-
-7. **Request an item with no stock.** Change the successful request's
-   `productId` to `2` and use a fresh key. Expect `422 Unprocessable Entity` and
-   no order row.
-
-8. **Check request errors.** An invalid email or a name containing digits returns
-   `400 Bad Request`. A nonexistent product ID such as `999999` returns `404`;
-   repeating a product ID in `items` also returns `400`.
-
-9. **Optionally exercise the reservation race.** Reset product `PVC150` at
-   `Miami Central` to 100 units in a SQL client:
-
-   ```sql
-   UPDATE inventory
-   SET quantity = 100
-   WHERE warehouse_id = (SELECT id FROM warehouses WHERE name = 'Miami Central')
-     AND product_id = (SELECT id FROM products WHERE sku = 'PVC150');
-   ```
-
-   Then submit two quantity-60 requests at once, each with a different
-   idempotency key. If both select the warehouse before either reserves stock,
-   expect one success and one recorded `409` race loss. If the second request
-   checks availability after the first reservation, it may instead get `422`
-   because no candidate is available at selection time.
-
-## Project setup
-
-```bash
-$ npm install
-```
-
-## Compile and run the project
-
-```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
-```
-
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-To build the Docker image and push it to the `canals-api` ECR repository in
-`us-east-2`, with AWS CLI credentials already configured, run:
-
-```bash
-AWS_REGION=us-east-2 ECR_REPOSITORY=canals-api ./scripts/deploy-ecr.sh
-```
-
-To also update an ECS service, pass the service name to `deploy-ecs.sh`. Set
-`ECS_CLUSTER` if the service is not in the `default` cluster:
-
-```bash
-AWS_REGION=us-east-2 \
-ECR_REPOSITORY=canals-api \
-ECS_CLUSTER=canals-cluster \
-./scripts/deploy-ecs.sh canals-api-service
-```
-
-The ECS script invokes `deploy-ecr.sh`, creates a task definition revision with
-the new image, updates the service, and waits for the service to become stable.
-It requires the AWS CLI, Docker, and `jq`.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
-
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Observability
-
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
-
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
-
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
-
-To add it to this project:
-
-```bash
-$ npm install @nestjs/observe
-```
-
-Then follow the [setup guide](https://docs.nestjs.com/observability/overview) - it takes a single import and an app key.
-
-The free plan needs no payment details and covers 300,000 events a month. You can also browse the [live demo](https://www.observe-demo.nestjs.com/dashboard) first - the whole dashboard over a busy service's data, with nothing to install.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observe](https://observe.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+The Address is snapshoted in the order:
+The `order` is associated with the `address`, but the order also snapshots the address info. Per the current system status, this is redundant since no event can modify the address row, but in a more realistic system, one might. It's also common practice to snapshot these kinds of fields in the order table
