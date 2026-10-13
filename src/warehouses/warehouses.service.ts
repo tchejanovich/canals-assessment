@@ -1,8 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 import type { Coordinates } from '../common/geo.js';
 import { DATABASE, type Database } from '../db/database.module.js';
-import { warehouses } from '../db/schema/index.js';
 import type { StockRequest } from '../inventory/inventory.types.js';
 
 export interface WarehouseWithDistance {
@@ -11,8 +10,7 @@ export interface WarehouseWithDistance {
   longitude: number;
 }
 
-/** Filters to warehouses with every requested item, then ranks them nearest-first.
- * Separate queries let the PostGIS GiST index serve distance ordering; callers
+/** Filters and ranks fulfilling warehouses in one PostGIS-backed query; callers
  * try the next candidate if a reservation loses a stock race.
  */
 @Injectable()
@@ -24,39 +22,8 @@ export class WarehousesService {
     destination: Coordinates,
     limit: number,
   ): Promise<WarehouseWithDistance[]> {
-    const ids = await this.findFulfillingWarehouseIds(requests);
-    if (ids.length === 0) {
-      return [];
-    }
+    if (requests.length === 0) return [];
 
-    // PostGIS points use (longitude, latitude); GiST-backed `<->` ordering lets
-    // LIMIT return nearest warehouses without sorting every candidate.
-    const origin = sql`ST_SetSRID(
-      ST_MakePoint(${destination.longitude}, ${destination.latitude}),
-      4326
-    )::geography`;
-
-    const rows = await this.db
-      .select({
-        id: warehouses.id,
-        latitude: warehouses.latitude,
-        longitude: warehouses.longitude,
-      })
-      .from(warehouses)
-      .where(and(eq(warehouses.active, true), inArray(warehouses.id, ids)))
-      .orderBy(sql`${warehouses.location} <-> ${origin}`)
-      .limit(limit);
-
-    return rows.map((row) => ({
-      id: row.id,
-      latitude: Number(row.latitude),
-      longitude: Number(row.longitude),
-    }));
-  }
-
-  private async findFulfillingWarehouseIds(
-    requests: StockRequest[],
-  ): Promise<number[]> {
     const required = sql.join(
       requests.map(
         (request) =>
@@ -65,17 +32,43 @@ export class WarehousesService {
       sql`, `,
     );
 
-    const rows = (await this.db.execute(sql`
-      SELECT w."id" AS "id"
-      FROM "warehouses" w
-      INNER JOIN "inventory" i ON i."warehouse_id" = w."id"
-      INNER JOIN (VALUES ${required}) AS req("product_id", "quantity")
-        ON req."product_id" = i."product_id"
-      WHERE w."active" = true AND i."quantity" >= req."quantity"
-      GROUP BY w."id"
-      HAVING COUNT(*) = ${requests.length}
-    `)) as unknown as { id: number | string }[];
+    // PostGIS points use (longitude, latitude); GiST-backed `<->` ordering lets
+    // LIMIT return nearest fulfilling warehouses without sorting every candidate.
+    const origin = sql`ST_SetSRID(
+      ST_MakePoint(${destination.longitude}, ${destination.latitude}),
+      4326
+    )::geography`;
 
-    return rows.map((row) => Number(row.id));
+    const rows = (await this.db.execute(sql`
+      SELECT
+        w."id" AS "id",
+        w."latitude" AS "latitude",
+        w."longitude" AS "longitude"
+      FROM "warehouses" w
+      WHERE w."active" = true
+        AND NOT EXISTS (
+          SELECT 1
+          FROM (VALUES ${required}) AS req("product_id", "quantity")
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM "inventory" i
+            WHERE i."warehouse_id" = w."id"
+              AND i."product_id" = req."product_id"
+              AND i."quantity" >= req."quantity"
+          )
+        )
+      ORDER BY w."location" <-> ${origin}
+      LIMIT ${limit}
+    `)) as unknown as {
+      id: number | string;
+      latitude: number | string;
+      longitude: number | string;
+    }[];
+
+    return rows.map((row) => ({
+      id: Number(row.id),
+      latitude: Number(row.latitude),
+      longitude: Number(row.longitude),
+    }));
   }
 }
