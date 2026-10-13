@@ -17,6 +17,81 @@ the test database.
 
 **Feel free to ask me for the database credentials to be able to run the suite against https://tchejanovich-canals-assessment.com!**
 
+### Test individual order cases with curl
+
+These examples use the seeded products and inventory. Set `DATABASE_URL` and
+look up the product IDs first; `BASE_URL` defaults to `http://localhost:3000`:
+
+```bash
+BASE_URL="${BASE_URL:-https://tchejanovich-canals-assessment.com}"
+```
+
+**Successful order** — expect `201 Created`:
+
+```bash
+curl -i -X POST "$BASE_URL/orders" \
+  -H 'Content-Type: application/json' \
+  --data-binary @- <<JSON
+{
+  "customer": {"name": "Taylor", "email": "taylor@example.com", "phone": "+1 305 555 0201"},
+  "address": {"line1": "101 NW 1st Ave", "city": "Miami", "region": "FL", "postalCode": "33130", "country": "US"},
+  "items": [{"productId": 1, "quantity": 1}],
+  "creditCardNumber": "4242424242424242"
+}
+JSON
+```
+
+**Not enough stock** — requests more than any single warehouse can supply; expect `422 Unprocessable Entity`:
+
+```bash
+curl -i -X POST "$BASE_URL/orders" \
+  -H 'Content-Type: application/json' \
+  --data-binary @- <<JSON
+{
+  "customer": {"name": "Taylor", "email": "taylor@example.com", "phone": "+1 305 555 0201"},
+  "address": {"line1": "101 NW 1st Ave", "city": "Miami", "region": "FL", "postalCode": "33130", "country": "US"},
+  "items": [{"productId": 1, "quantity": 100000}],
+  "creditCardNumber": "4242424242424242"
+}
+JSON
+```
+
+**Mixeed currencies** — products with different currencies; expect `400 Bad Request`:
+
+```bash
+curl -i -X POST "$BASE_URL/orders" \
+  -H 'Content-Type: application/json' \
+  --data-binary @- <<JSON
+{
+  "customer": {"name": "Taylor", "email": "taylor@example.com", "phone": "+1 305 555 0201"},
+  "address": {"line1": "101 NW 1st Ave", "city": "Miami", "region": "FL", "postalCode": "33130", "country": "US"},
+  "items": [
+    {"productId": 4, "quantity": 250},
+    {"productId": 5, "quantity": 250}
+  ],
+  "creditCardNumber": "4242424242424242"
+}
+JSON
+```
+
+**No warehouse can fulfill all products** — requests quantities available only at separate warehouses; expect `422 Unprocessable Entity`:
+
+```bash
+curl -i -X POST "$BASE_URL/orders" \
+  -H 'Content-Type: application/json' \
+  --data-binary @- <<JSON
+{
+  "customer": {"name": "Taylor", "email": "taylor@example.com", "phone": "+1 305 555 0201"},
+  "address": {"line1": "101 NW 1st Ave", "city": "Miami", "region": "FL", "postalCode": "33130", "country": "US"},
+  "items": [
+    {"productId": 3, "quantity": 250},
+    {"productId": 5, "quantity": 250}
+  ],
+  "creditCardNumber": "4242424242424242"
+}
+JSON
+```
+
 ## Cases and expectations
 
 ### Health check
@@ -60,15 +135,15 @@ containing the field paths and messages.
 
 ### Stock and warehouse selection
 
-| Case                                                                          | Expected                                                                                                                                                     |
-| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Request exactly the stock available at the nearest warehouse                  | `201 Created`; active order uses Miami Closest, reserves 100 PVC 90s, and totals `120000` minor units. That inventory row becomes zero.                      |
-| Request more than any one warehouse can supply                                | `422 Unprocessable Entity`; message is `No single warehouse can fulfil the entire order`.                                                                    |
-| Basket contains one stocked product and one active product with no stock      | `422 Unprocessable Entity`; no single warehouse can fulfil the basket.                                                                                       |
-| Multi-product order is fully stocked at one warehouse                         | `201 Created`; active order uses Miami Backup after the exact-stock case consumes Miami Closest's PVC 90 stock.                                              |
-| Products are stocked only at separate warehouses for the requested quantities | `422 Unprocessable Entity`; no single warehouse can fulfil the basket.                                                                                       |
-| Multiple warehouses can fulfil an order                                       | `201 Created`; the nearest fulfilling warehouse, Miami Closest, is selected.                                                                                 |
-| Nearest candidate loses stock before reservation                              | `201 Created`; reservation falls back to Miami Backup. The runner coordinates this race with database row locks.                                             |
+| Case                                                                          | Expected                                                                                                                                                                                                                   |
+| ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Request exactly the stock available at the nearest warehouse                  | `201 Created`; active order uses Miami Closest, reserves 100 PVC 90s, and totals `120000` minor units. That inventory row becomes zero.                                                                                    |
+| Request more than any one warehouse can supply                                | `422 Unprocessable Entity`; message is `No single warehouse can fulfil the entire order`.                                                                                                                                  |
+| Basket contains one stocked product and one active product with no stock      | `422 Unprocessable Entity`; no single warehouse can fulfil the basket.                                                                                                                                                     |
+| Multi-product order is fully stocked at one warehouse                         | `201 Created`; active order uses Miami Backup after the exact-stock case consumes Miami Closest's PVC 90 stock.                                                                                                            |
+| Products are stocked only at separate warehouses for the requested quantities | `422 Unprocessable Entity`; no single warehouse can fulfil the basket.                                                                                                                                                     |
+| Multiple warehouses can fulfil an order                                       | `201 Created`; the nearest fulfilling warehouse, Miami Closest, is selected.                                                                                                                                               |
+| Nearest candidate loses stock before reservation                              | `201 Created`; reservation falls back to Miami Backup. The runner coordinates this race with database row locks.                                                                                                           |
 | Every selected candidate loses stock before reservation                       | `409 Conflict`; the order is recorded as `failed` with reason `stock_reservation`, no stock reserved, and no payment charged. Replaying its key preserves `409`. The runner coordinates this race with database row locks. |
 
 The runner initializes the documented 100/200/500 inventory baseline at startup.
@@ -77,13 +152,13 @@ race cases alter inventory and the runner restores the baseline afterward.
 
 ### Products and payments
 
-| Case                                      | Expected                                                                                                      |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| Order contains an inactive product        | `400 Bad Request`; message says the product is not available.                                                 |
-| Order references a nonexistent product ID | `404 Not Found`; message identifies the missing product.                                                      |
-| Duplicate product IDs in one order        | `400 Bad Request`; validation error identifies `items`.                                                       |
-| Order mixes product currencies            | `400 Bad Request`; message is `All products in an order must share the same currency`.                        |
-| Payment is approved                       | `201 Created`; order is `active`, and PVC 90 inventory decreases by one.                                      |
+| Case                                      | Expected                                                                                                                                  |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Order contains an inactive product        | `400 Bad Request`; message says the product is not available.                                                                             |
+| Order references a nonexistent product ID | `404 Not Found`; message identifies the missing product.                                                                                  |
+| Duplicate product IDs in one order        | `400 Bad Request`; validation error identifies `items`.                                                                                   |
+| Order mixes product currencies            | `400 Bad Request`; message is `All products in an order must share the same currency`.                                                    |
+| Payment is approved                       | `201 Created`; order is `active`, and PVC 90 inventory decreases by one.                                                                  |
 | Payment is declined                       | `402 Payment Required`; message is `Payment was declined`; order state is `failed` with reason `payment`, and reserved stock is restored. |
 
 ### Idempotency and retrieval
