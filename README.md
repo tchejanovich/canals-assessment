@@ -8,9 +8,9 @@
   PostGIS 3 is a suitable local setup; the project does not pin a server version.
 
 ### Installing PostGIS
-- macOS: Run brew install postgis with Homebrew; it installs PostGIS and its PostgreSQL dependencies.
+- macOS: Run `brew install postgis` with Homebrew; it installs PostGIS and its PostgreSQL dependencies.
 - Windows: Install PostgreSQL using the EDB installer, then use Stack Builder to add PostGIS.
-- Linux (Ubuntu/Debian): Run sudo apt install postgresql postgis; use your PostgreSQL version’s PostGIS package if needed.
+- Linux (Ubuntu/Debian): Run `sudo apt install postgresql postgis`; use your PostgreSQL version’s PostGIS package if needed.
   
 
 ### Configure and run
