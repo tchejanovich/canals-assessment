@@ -39,6 +39,7 @@ export class WarehousesService {
       4326
     )::geography`;
 
+    // Relational division via double NOT EXISTS requires stock for every item without grouping before GiST ranking.
     const rows = (await this.db.execute(sql`
       SELECT
         w."id" AS "id",
