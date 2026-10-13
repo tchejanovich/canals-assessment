@@ -7,3 +7,4 @@ dist
 *.tsbuildinfo
 global-bundle.pem
 *.md
+testing
