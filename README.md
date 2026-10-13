@@ -74,7 +74,7 @@ Returns the order, including its customer, selected warehouse, and line items.
     "postalCode": "33130",
     "country": "US"
   },
-  "items": [{ "productId": 1, "quantity": 2 }],
+  "items": [{ "productId": 13, "quantity": 2 }],
   "creditCardNumber": "4242424242424242"
 }
 ```
