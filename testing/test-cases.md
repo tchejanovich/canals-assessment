@@ -17,7 +17,7 @@ the test database.
 
 **Feel free to ask me for the database credentials to be able to run the suite against https://tchejanovich-canals-assessment.com!**
 
-### Test individual order cases with curl
+### Test individual order cases with curl on **https://tchejanovich-canals-assessment.com**:
 
 ```bash
 BASE_URL="${BASE_URL:-https://tchejanovich-canals-assessment.com}"
