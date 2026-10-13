@@ -88,16 +88,7 @@ export class OrderPlacementService {
         }
 
         // Persist the reservation race as a terminal failed order.
-        const [failed] = await tx
-          .update(orders)
-          .set({
-            state: OrderState.Failed,
-            failureReason: OrderFailureReason.StockReservation,
-          })
-          .where(eq(orders.id, order.id))
-          .returning();
-        if (!failed) throw new OrderVanishedError(order.id);
-
+        const failed = await this.markFailedForStockReservation(tx, order.id);
         return { order: failed, state: OrderState.Failed };
       });
 
@@ -208,5 +199,21 @@ export class OrderPlacementService {
       `Order ${order.id} could not reserve stock at any of ${candidates.length} candidate warehouses`,
     );
     return null;
+  }
+
+  private async markFailedForStockReservation(
+    tx: DatabaseTransaction,
+    orderId: number,
+  ): Promise<Order> {
+    const [failed] = await tx
+      .update(orders)
+      .set({
+        state: OrderState.Failed,
+        failureReason: OrderFailureReason.StockReservation,
+      })
+      .where(eq(orders.id, orderId))
+      .returning();
+    if (!failed) throw new OrderVanishedError(orderId);
+    return failed;
   }
 }
