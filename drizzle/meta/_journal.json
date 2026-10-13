@@ -169,6 +169,13 @@
       "when": 1791837166014,
       "tag": "0023_drop_order_subtotal_amount",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1791855637238,
+      "tag": "0024_seed_review_test_fixtures",
+      "breakpoints": true
     }
   ]
 }
