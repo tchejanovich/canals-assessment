@@ -194,6 +194,9 @@ export class OrderPlacementService {
       }
     }
 
+    this.logger.warn(
+      `Order ${order.id} could not reserve stock at any of ${candidates.length} candidate warehouses`,
+    );
     return null;
   }
 }

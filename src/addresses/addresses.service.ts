@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { and, eq, isNull, or } from 'drizzle-orm';
 import {
   DATABASE,
@@ -28,6 +28,8 @@ type AddressWithCoordinates = Address & {
 
 @Injectable()
 export class AddressesService {
+  private readonly logger = new Logger(AddressesService.name);
+
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     private readonly geocoding: GeocodingService,
@@ -81,6 +83,7 @@ export class AddressesService {
       .where(eq(addresses.fingerprint, fingerprint))
       .limit(1);
     if (existing) {
+      this.logger.debug(`Reusing shipping address ${existing.id}`);
       return this.ensureCoordinates(tx, existing, input);
     }
 
@@ -115,6 +118,11 @@ export class AddressesService {
       throw new AddressConflictError();
     }
 
+    this.logger.log(
+      inserted[0]
+        ? `Inserted shipping address ${address.id} in the order transaction`
+        : `Reusing shipping address ${address.id} inserted concurrently`,
+    );
     return this.ensureCoordinates(tx, address, input);
   }
 

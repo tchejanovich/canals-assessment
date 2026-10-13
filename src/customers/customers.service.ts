@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import {
   DATABASE,
@@ -14,6 +14,8 @@ import type { CustomerInput } from './customers.types.js';
 
 @Injectable()
 export class CustomersService {
+  private readonly logger = new Logger(CustomersService.name);
+
   constructor(@Inject(DATABASE) private readonly db: Database) {}
 
   async validateForOrder(input: CustomerInput): Promise<void> {
@@ -37,6 +39,7 @@ export class CustomersService {
       .limit(1);
     if (existing) {
       this.assertMatchingDetails(existing, input);
+      this.logger.debug(`Reusing customer ${existing.id}`);
       return existing;
     }
 
@@ -50,7 +53,10 @@ export class CustomersService {
       .onConflictDoNothing({ target: customers.email })
       .returning();
 
-    if (inserted) return inserted;
+    if (inserted) {
+      this.logger.log(`Inserted customer ${inserted.id} in the order transaction`);
+      return inserted;
+    }
 
     const [customer] = await tx
       .select()
@@ -62,6 +68,7 @@ export class CustomersService {
     }
 
     this.assertMatchingDetails(customer, input);
+    this.logger.debug(`Reusing customer ${customer.id} inserted concurrently`);
     return customer;
   }
 

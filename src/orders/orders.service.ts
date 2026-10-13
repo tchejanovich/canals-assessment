@@ -153,6 +153,9 @@ export class OrdersService {
       );
       throw new NoFulfillingWarehouseError();
     }
+    this.logger.debug(
+      `Found ${candidates.length} fulfilling warehouse candidate(s); nearest is ${candidates[0].id}`,
+    );
 
     return {
       pricedLineItems,
