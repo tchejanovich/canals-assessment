@@ -78,7 +78,7 @@ Returns the order, including its customer, selected warehouse, and line items.
   "creditCardNumber": "4242424242424242"
 }
 ```
-**Available products ID: 13, 14,15,16 and 17.**
+**Available products ID on https://tchejanovich-canals-assessment.com: 13, 14,15,16 and 17.**
 - `201 Created` — a new order was placed, stock reserved, and payment approved.
 - `200 OK` — a matching idempotency-key replay; returns the existing order.
 - `400 Bad Request` — invalid input or a business-rule violation, such as an
