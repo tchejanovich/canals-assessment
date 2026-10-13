@@ -1,6 +1,8 @@
+import { sql } from 'drizzle-orm';
 import {
   bigint,
   char,
+  check,
   index,
   numeric,
   pgEnum,
@@ -57,6 +59,7 @@ export const orders = pgTable(
     idempotencyKey: text('idempotency_key'),
     idempotencyRequestFingerprint: text('idempotency_request_fingerprint'),
     state: orderState('state').notNull().default(OrderState.Created),
+    failureReason: text('failure_reason'),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -66,6 +69,14 @@ export const orders = pgTable(
     index('orders_created_at_idx').on(table.createdAt),
     index('orders_state_created_at_idx').on(table.state, table.createdAt),
     uniqueIndex('orders_idempotency_key_unique').on(table.idempotencyKey),
+    check(
+      'orders_failure_reason_valid',
+      sql`${table.failureReason} IS NULL OR ${table.failureReason} IN ('payment', 'stock_reservation')`,
+    ),
+    check(
+      'orders_failure_reason_state_consistent',
+      sql`(${table.state} = 'failed' AND ${table.failureReason} IS NOT NULL) OR (${table.state} <> 'failed' AND ${table.failureReason} IS NULL)`,
+    ),
   ],
 );
 

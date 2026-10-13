@@ -221,6 +221,11 @@ COMMIT;"
   HTTP_CODE="$(<"$status_file")"
   HTTP_BODY="$(<"$body_file")"
   check_response "$name" "$expected_code" "$jq_filter"
+  if [[ "$expected_code" == 409 ]]; then
+    check_db_value 'Race-lost order entered failed state' 'failed' "$(db_scalar "SELECT state::text FROM orders WHERE idempotency_key = '$key';")"
+    check_db_value 'Race-lost order records stock reservation reason' 'stock_reservation' "$(db_scalar "SELECT failure_reason FROM orders WHERE idempotency_key = '$key';")"
+    check_order 'Replay stock-reservation failure preserves 409' 409 '.statusCode == 409 and (.message | contains("state '\''failed'\''")) and (.message | contains("no stock was reserved"))' "$BASE_BODY" "$key"
+  fi
 }
 
 ids="$(psql "$DATABASE_URL" -XAt -F '|' -v ON_ERROR_STOP=1 -c "
@@ -374,7 +379,7 @@ run_controlled_race \
   "${RUN_ID}-all-candidates-race" \
   "w.name IN ('Miami Closest', 'Miami Backup', 'Orlando Stock')" \
   409 \
-  '.statusCode == 409 and (.message | contains("state '\''created'\''")) and (.message | contains("no stock was reserved"))'
+  '.statusCode == 409 and (.message | contains("state '\''failed'\''")) and (.message | contains("no stock was reserved"))'
 
 # Race orchestration drains stock deliberately. Reinitialize once before the
 # remaining product, payment, and idempotency cases.
@@ -396,6 +401,7 @@ check_db_value 'Successful payment decremented PVC 90 stock' 99 "$(db_scalar "SE
 body="$(jq -c '.creditCardNumber = "4242424242420000"' <<<"$BASE_BODY")"
 check_order 'Declined payment returns 402 and restores stock' 402 '.statusCode == 402 and .message == "Payment was declined"' "$body" "${RUN_ID}-decline"
 check_db_value 'Declined order entered failed state' 'failed' "$(db_scalar "SELECT state::text FROM orders WHERE idempotency_key = '${RUN_ID}-decline';")"
+check_db_value 'Declined order records payment failure reason' 'payment' "$(db_scalar "SELECT failure_reason FROM orders WHERE idempotency_key = '${RUN_ID}-decline';")"
 check_db_value 'Declined payment restored glue stock' 100 "$(db_scalar "SELECT i.quantity FROM inventory i JOIN warehouses w ON w.id=i.warehouse_id JOIN products p ON p.id=i.product_id WHERE w.name='Miami Closest' AND p.sku='PVC-GLUE-QT';")"
 
 key="${RUN_ID}-replay"

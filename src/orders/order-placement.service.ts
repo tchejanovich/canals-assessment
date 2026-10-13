@@ -19,7 +19,7 @@ import type {
 import type { CustomerInput } from '../customers/customers.types.js';
 import { IDEMPOTENCY_CONFLICT } from './orders.idempotency.js';
 import { IdempotencyKeyConflict, OrderVanishedError } from './orders.errors.js';
-import { OrderState } from './order-state.js';
+import { OrderFailureReason, OrderState } from './order-state.js';
 import type { OrderPlacementResult, PricedLineItem } from './orders.types.js';
 
 export interface PlaceOrderInput {
@@ -87,8 +87,18 @@ export class OrderPlacementService {
           return { order: reserved, state: OrderState.Reserved };
         }
 
-        // Keep the order to record that all candidates lost the reservation race.
-        return { order, state: OrderState.Created };
+        // Persist the reservation race as a terminal failed order.
+        const [failed] = await tx
+          .update(orders)
+          .set({
+            state: OrderState.Failed,
+            failureReason: OrderFailureReason.StockReservation,
+          })
+          .where(eq(orders.id, order.id))
+          .returning();
+        if (!failed) throw new OrderVanishedError(order.id);
+
+        return { order: failed, state: OrderState.Failed };
       });
 
       return { type: 'placed', ...result };

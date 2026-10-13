@@ -35,7 +35,7 @@ export class UnfulfilledOrderError extends DomainError {
   constructor(readonly orderId: number) {
     super(
       `Order ${orderId} could not be fulfilled (stock ran out at every nearby warehouse during reservation). ` +
-        `It is recorded with state '${OrderState.Created}', no stock was reserved and nothing was charged. ` +
+        `It is recorded with state '${OrderState.Failed}', no stock was reserved and nothing was charged. ` +
         `Retry with a new idempotency key to attempt it again`,
     );
   }

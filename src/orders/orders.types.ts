@@ -1,7 +1,7 @@
 import type { Order, Product } from '../db/schema/index.js';
 import type { Coordinates } from '../common/geo.js';
 import { IDEMPOTENCY_CONFLICT } from './orders.idempotency.js';
-import type { OrderState } from './order-state.js';
+import { OrderState } from './order-state.js';
 import type { IdempotencyKeyConflict } from './orders.errors.js';
 import type { WarehouseWithDistance } from '../warehouses/warehouses.service.js';
 
@@ -23,5 +23,9 @@ export interface PreparedOrder {
 }
 
 export type OrderPlacementResult =
-  | { type: 'placed'; order: Order; state: OrderState }
+  | {
+      type: 'placed';
+      order: Order;
+      state: typeof OrderState.Reserved | typeof OrderState.Failed;
+    }
   | { type: typeof IDEMPOTENCY_CONFLICT; error: IdempotencyKeyConflict };

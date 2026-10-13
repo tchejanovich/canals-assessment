@@ -40,7 +40,7 @@ import {
   calculateTotal,
   resolveCurrency,
 } from './orders.pricing.js';
-import { OrderState } from './order-state.js';
+import { OrderFailureReason, OrderState } from './order-state.js';
 import type { PreparedOrder } from './orders.types.js';
 
 /** Try at most five nearest candidates; reservation rechecks stock under lock. */
@@ -113,8 +113,19 @@ export class OrdersService {
       );
     }
 
-    if (outcome.state === OrderState.Created) {
-      throw new UnfulfilledOrderError(outcome.order.id);
+    if (outcome.state === OrderState.Failed) {
+      switch (outcome.order.failureReason) {
+        case OrderFailureReason.StockReservation:
+          throw new UnfulfilledOrderError(outcome.order.id);
+        case OrderFailureReason.Payment:
+          throw new Error(
+            `Order ${outcome.order.id} failed payment before finalization`,
+          );
+        default:
+          throw new Error(
+            `Failed order ${outcome.order.id} has no failure reason`,
+          );
+      }
     }
 
     const finalized = await this.finalization.finalizeReservedOrder(
@@ -291,7 +302,16 @@ export class OrdersService {
         });
       }
       case OrderState.Failed:
-        throw new OrderPaymentDeclinedError(existing.serialized.order.id);
+        switch (existing.serialized.order.failureReason) {
+          case OrderFailureReason.Payment:
+            throw new OrderPaymentDeclinedError(existing.serialized.order.id);
+          case OrderFailureReason.StockReservation:
+            throw new UnfulfilledOrderError(existing.serialized.order.id);
+          default:
+            throw new Error(
+              `Failed order ${existing.serialized.order.id} has no failure reason`,
+            );
+        }
       default:
         throw new UnfulfilledOrderError(existing.serialized.order.id);
     }

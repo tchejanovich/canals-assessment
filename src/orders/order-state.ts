@@ -1,14 +1,15 @@
 /**
  * Canonical states used by the database enum, API, and transition guards.
- * Flow: `created` → `reserved` → `active`; `failed` records an unsuccessful
- * payment attempt. State changes use guarded updates.
+ * Flow: `created` → `reserved` → `active`, or `created`/`reserved` → `failed`.
+ * State changes use guarded updates.
  *
- * - `created`: order and lines saved, but no stock reserved; records a
- *   reservation race and keeps the idempotency key bound.
+ * - `created`: transient state while order lines are saved and stock reservation
+ *   is attempted.
  * - `reserved`: stock is assigned and deducted; payment is pending. Replaying
  *   the key resumes payment with provider-scoped idempotency keys.
  * - `active`: paid and ready to fulfill.
- * - `failed`: payment did not complete and reserved stock was restored.
+ * - `failed`: terminal unsuccessful outcome; `failureReason` distinguishes a
+ *   stock reservation race from a payment failure.
  */
 export const OrderState = {
   Created: 'created',
@@ -18,6 +19,14 @@ export const OrderState = {
 } as const;
 
 export type OrderState = (typeof OrderState)[keyof typeof OrderState];
+
+export const OrderFailureReason = {
+  Payment: 'payment',
+  StockReservation: 'stock_reservation',
+} as const;
+
+export type OrderFailureReason =
+  (typeof OrderFailureReason)[keyof typeof OrderFailureReason];
 
 /** Persistable states in declaration order for the `order_state` enum. */
 export const ORDER_STATES = [

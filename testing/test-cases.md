@@ -69,7 +69,7 @@ containing the field paths and messages.
 | Products are stocked only at separate warehouses for the requested quantities | `422 Unprocessable Entity`; no single warehouse can fulfil the basket.                                                                                       |
 | Multiple warehouses can fulfil an order                                       | `201 Created`; the nearest fulfilling warehouse, Miami Closest, is selected.                                                                                 |
 | Nearest candidate loses stock before reservation                              | `201 Created`; reservation falls back to Miami Backup. The runner coordinates this race with database row locks.                                             |
-| Every selected candidate loses stock before reservation                       | `409 Conflict`; the order is recorded as `created`, with no stock reserved and no payment charged. The runner coordinates this race with database row locks. |
+| Every selected candidate loses stock before reservation                       | `409 Conflict`; the order is recorded as `failed` with reason `stock_reservation`, no stock reserved, and no payment charged. Replaying its key preserves `409`. The runner coordinates this race with database row locks. |
 
 The runner initializes the documented 100/200/500 inventory baseline at startup.
 The exact-stock case consumes the nearest warehouse's PVC 90 stock; controlled
@@ -84,7 +84,7 @@ race cases alter inventory and the runner restores the baseline afterward.
 | Duplicate product IDs in one order        | `400 Bad Request`; validation error identifies `items`.                                                       |
 | Order mixes product currencies            | `400 Bad Request`; message is `All products in an order must share the same currency`.                        |
 | Payment is approved                       | `201 Created`; order is `active`, and PVC 90 inventory decreases by one.                                      |
-| Payment is declined                       | `402 Payment Required`; message is `Payment was declined`; order state is `failed` and reserved stock is restored. |
+| Payment is declined                       | `402 Payment Required`; message is `Payment was declined`; order state is `failed` with reason `payment`, and reserved stock is restored. |
 
 ### Idempotency and retrieval
 

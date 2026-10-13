@@ -12,7 +12,7 @@ import {
   PaymentDeclinedError,
   ReservedOrderMissingWarehouseError,
 } from './orders.errors.js';
-import { OrderState } from './order-state.js';
+import { OrderFailureReason, OrderState } from './order-state.js';
 
 @Injectable()
 export class OrderFinalizationService {
@@ -140,7 +140,10 @@ export class OrderFinalizationService {
     await this.db.transaction(async (tx) => {
       const [failed] = await tx
         .update(orders)
-        .set({ state: OrderState.Failed })
+        .set({
+          state: OrderState.Failed,
+          failureReason: OrderFailureReason.Payment,
+        })
         .where(
           and(eq(orders.id, orderId), eq(orders.state, OrderState.Reserved)),
         )

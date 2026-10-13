@@ -183,6 +183,13 @@
       "when": 1791859793978,
       "tag": "0025_replace_cancelled_order_state",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1791860309118,
+      "tag": "0026_add_order_failure_reason",
+      "breakpoints": true
     }
   ]
 }
