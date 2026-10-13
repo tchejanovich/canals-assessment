@@ -19,9 +19,6 @@ the test database.
 
 ### Test individual order cases with curl
 
-These examples use the seeded products and inventory. Set `DATABASE_URL` and
-look up the product IDs first; `BASE_URL` defaults to `http://localhost:3000`:
-
 ```bash
 BASE_URL="${BASE_URL:-https://tchejanovich-canals-assessment.com}"
 ```
