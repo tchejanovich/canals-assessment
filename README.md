@@ -64,7 +64,7 @@ Returns the order, including its customer, selected warehouse, and line items.
   "customer": {
     "name": "Taylor",
     "email": "taylor@example.com",
-    "phone": "+1 305 555 0100"
+    "phone": "+1 305 555 0201"
   },
   "address": {
     "line1": "123 Main St",
@@ -78,7 +78,7 @@ Returns the order, including its customer, selected warehouse, and line items.
   "creditCardNumber": "4242424242424242"
 }
 ```
-
+**Available products ID: 13, 14,15,16 and 17.**
 - `201 Created` — a new order was placed, stock reserved, and payment approved.
 - `200 OK` — a matching idempotency-key replay; returns the existing order.
 - `400 Bad Request` — invalid input or a business-rule violation, such as an
